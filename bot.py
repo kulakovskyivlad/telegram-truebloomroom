@@ -12,16 +12,18 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
-SHEET_NAME = os.getenv("SHEET_NAME", "Склад")
+
+STOCK_SHEET_NAME = os.getenv("SHEET_NAME", "Склад")
+FLOWERS_SHEET_NAME = os.getenv("FLOWERS_SHEET_NAME", "Цветы")
+
 PORT = int(os.getenv("PORT", "10000"))
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
-
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
 
 web = Flask(__name__)
 
@@ -33,10 +35,9 @@ def get_credentials():
     )
 
 
-def get_worksheet():
+def get_spreadsheet():
     client = gspread.authorize(get_credentials())
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    return spreadsheet.worksheet(SHEET_NAME)
+    return client.open_by_key(SPREADSHEET_ID)
 
 
 def normalize(text):
@@ -45,38 +46,85 @@ def normalize(text):
     return text.strip()
 
 
-def load_rows():
-    worksheet = get_worksheet()
+def find_header_row(values, required_columns, max_rows=30):
+    required = {normalize(column) for column in required_columns}
+
+    for header_index, raw_header in enumerate(values[:max_rows]):
+        headers = {normalize(cell) for cell in raw_header}
+        if required.issubset(headers):
+            return header_index
+
+    return None
+
+
+def load_sheet_rows(sheet_name, product_column, remaining_column, category):
+    spreadsheet = get_spreadsheet()
+    worksheet = spreadsheet.worksheet(sheet_name)
     values = worksheet.get_all_values()
 
     if not values:
         return []
 
-    for header_index, raw_header in enumerate(values[:30]):
-        headers = [normalize(cell) for cell in raw_header]
+    header_index = find_header_row(
+        values,
+        [product_column, remaining_column],
+    )
 
-        if "товар" not in headers or "осталось" not in headers:
+    if header_index is None:
+        raise ValueError(
+            f'На листе "{sheet_name}" не найдены колонки '
+            f'"{product_column}" и "{remaining_column}".'
+        )
+
+    headers = [normalize(cell) for cell in values[header_index]]
+    product_index = headers.index(normalize(product_column))
+    remaining_index = headers.index(normalize(remaining_column))
+
+    rows = []
+
+    for raw_row in values[header_index + 1:]:
+        product = (
+            raw_row[product_index].strip()
+            if product_index < len(raw_row)
+            else ""
+        )
+
+        if not product:
             continue
 
-        product_index = headers.index("товар")
-        remaining_index = headers.index("осталось")
-        rows = []
+        remaining = (
+            raw_row[remaining_index].strip()
+            if remaining_index < len(raw_row)
+            else ""
+        )
 
-        for raw_row in values[header_index + 1:]:
-            product = raw_row[product_index].strip() if product_index < len(raw_row) else ""
-            if not product:
-                continue
-
-            remaining = raw_row[remaining_index].strip() if remaining_index < len(raw_row) else ""
-
-            rows.append({
+        rows.append(
+            {
                 "Товар": product,
                 "Осталось": remaining,
-            })
+                "Источник": category,
+            }
+        )
 
-        return rows
+    return rows
 
-    raise ValueError('На листе "Склад" не найдены колонки "Товар" и "Осталось".')
+
+def load_all_rows():
+    stock_rows = load_sheet_rows(
+        STOCK_SHEET_NAME,
+        "Товар",
+        "Осталось",
+        "📦 СКЛАД",
+    )
+
+    flower_rows = load_sheet_rows(
+        FLOWERS_SHEET_NAME,
+        "Сорт",
+        "Остаток",
+        "🌸 ЦВЕТЫ",
+    )
+
+    return stock_rows + flower_rows
 
 
 def search_products(query, rows):
@@ -99,7 +147,10 @@ def search_products(query, rows):
                 score += 30
             else:
                 best = max(
-                    (SequenceMatcher(None, word, token).ratio() for token in product.split()),
+                    (
+                        SequenceMatcher(None, word, token).ratio()
+                        for token in product.split()
+                    ),
                     default=0,
                 )
                 if best >= 0.75:
@@ -133,40 +184,72 @@ def format_number(value):
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def format_results(query, results):
-    if not results:
-        return (
-            f"🔎 По запросу «{query}» ничего не найдено.\n\n"
-            "Попробуй, например:\n"
-            "остатки лейка\n"
-            "остатки ведро"
-        )
+def group_results(results):
+    return {
+        "📦 СКЛАД": [r for r in results if r.get("Источник") == "📦 СКЛАД"],
+        "🌸 ЦВЕТЫ": [r for r in results if r.get("Источник") == "🌸 ЦВЕТЫ"],
+    }
 
-    total = sum(parse_number(row.get("Осталось", "")) for row in results)
+
+def format_group(title, rows):
+    if not rows:
+        return f"{title}\nНичего не найдено\nИтого: 0 шт."
+
+    total = sum(parse_number(row.get("Осталось", "")) for row in rows)
 
     lines = [
-        f"📦 Остатки по запросу «{query}»",
-        f"📊 Общее количество: **{format_number(total)} шт.**",
-        f"Найдено товаров: {len(results)}",
+        title,
+        f"Позиций: {len(rows)}",
         "",
     ]
 
-    for row in results:
+    for row in rows:
         product = str(row.get("Товар", "")).strip()
         remaining = str(row.get("Осталось", "")).strip() or "—"
-        lines.append(f"• {product} — **{remaining} шт.**")
+        lines.append(f"• {product} — {remaining} шт.")
+
+    lines.extend([
+        "",
+        f"Итого: {format_number(total)} шт.",
+    ])
 
     return "\n".join(lines)
+
+
+def format_results(query, results):
+    groups = group_results(results)
+
+    stock_total = sum(
+        parse_number(row.get("Осталось", ""))
+        for row in groups["📦 СКЛАД"]
+    )
+    flowers_total = sum(
+        parse_number(row.get("Осталось", ""))
+        for row in groups["🌸 ЦВЕТЫ"]
+    )
+    grand_total = stock_total + flowers_total
+
+    parts = [
+        f"🔎 Остатки по запросу «{query}»",
+        "",
+        format_group("📦 СКЛАД", groups["📦 СКЛАД"]),
+        "",
+        format_group("🌸 ЦВЕТЫ", groups["🌸 ЦВЕТЫ"]),
+        "",
+        f"📊 ОБЩИЙ ИТОГ: {format_number(grand_total)} шт.",
+    ]
+
+    return "\n".join(parts)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! 👋\n\n"
-        "Я могу показать остатки товаров из Google Таблицы.\n\n"
+        "Я могу показать остатки из Google Таблицы.\n\n"
         "Напиши:\n"
-        "• остатки — все товары\n"
-        "• остатки лейка — все лейки\n"
-        "• остатки ведро — все вёдра"
+        "• остатки — все остатки отдельно по складу и цветам\n"
+        "• остатки лейка — лейки отдельно по складу и цветам\n"
+        "• остатки роза — розы отдельно по складу и цветам"
     )
 
 
@@ -181,14 +264,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = text
 
     try:
-        rows = load_rows()
+        rows = load_all_rows()
 
         if not query:
+            # Показываем все позиции с ненулевым остатком.
             results = [
-                row for row in rows
-                if str(row.get("Осталось", "")).strip() not in ("", "0", "0.0")
+                row
+                for row in rows
+                if parse_number(row.get("Осталось", "")) != 0
             ]
-            results.sort(key=lambda r: normalize(r.get("Товар", "")))
+            results.sort(
+                key=lambda row: (
+                    0 if row.get("Источник") == "📦 СКЛАД" else 1,
+                    normalize(row.get("Товар", "")),
+                )
+            )
             display_query = "все товары"
         else:
             results = search_products(query, rows)
@@ -197,37 +287,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = format_results(display_query, results)
 
         if len(message) <= 4000:
-            await update.message.reply_text(message, parse_mode="Markdown")
+            await update.message.reply_text(message)
         else:
             current = ""
             for line in message.splitlines():
                 if len(current) + len(line) + 1 > 3900:
-                    await update.message.reply_text(current, parse_mode="Markdown")
+                    await update.message.reply_text(current)
                     current = ""
                 current += line + "\n"
+
             if current:
-                await update.message.reply_text(current, parse_mode="Markdown")
+                await update.message.reply_text(current)
 
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}")
         await update.message.reply_text(
             "⚠️ Не удалось получить данные из Google Таблицы.\n"
-            "Проверь подключение к листу «Склад»."
+            'Проверь листы "Склад" и "Цветы" и названия колонок.'
         )
 
 
 def build_application():
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .updater(None)
+        .build()
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
+
     return application
 
 
 async def set_webhook():
     application = build_application()
     await application.initialize()
+
     try:
         await application.bot.set_webhook(
             url=f"{RENDER_EXTERNAL_URL}/telegram",
@@ -240,6 +339,7 @@ async def set_webhook():
 async def process_update(data):
     application = build_application()
     await application.initialize()
+
     try:
         update = Update.de_json(data, application.bot)
         await application.process_update(update)
@@ -260,6 +360,7 @@ def health():
 @web.post("/telegram")
 def telegram_webhook():
     data = request.get_json(silent=True)
+
     if not data:
         return "Bad Request", 400
 
