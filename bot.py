@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 from difflib import SequenceMatcher
 
 import gspread
@@ -20,9 +21,9 @@ SCOPES = [
 ]
 
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
 
-app = Flask(__name__)
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+web = Flask(__name__)
 
 
 def get_credentials():
@@ -215,45 +216,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+def build_application():
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+    return application
 
 
-@app.get("/")
+async def set_webhook():
+    application = build_application()
+    await application.initialize()
+    try:
+        await application.bot.set_webhook(
+            url=f"{RENDER_EXTERNAL_URL}/telegram",
+            drop_pending_updates=True,
+        )
+    finally:
+        await application.shutdown()
+
+
+async def process_update(data):
+    application = build_application()
+    await application.initialize()
+    try:
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+    finally:
+        await application.shutdown()
+
+
+@web.get("/")
 def home():
     return "Telegram stock bot is running", 200
 
 
-@app.get("/health")
+@web.get("/health")
 def health():
     return "OK", 200
 
 
-@app.post("/telegram")
-async def telegram_webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return "OK", 200
+@web.post("/telegram")
+def telegram_webhook():
+    data = request.get_json(silent=True)
+    if not data:
+        return "Bad Request", 400
 
-
-@app.before_request
-async def initialize():
-    if not telegram_app.initialized:
-        await telegram_app.initialize()
+    try:
+        asyncio.run(process_update(data))
+        return "OK", 200
+    except Exception as exc:
+        print(f"WEBHOOK ERROR: {type(exc).__name__}: {exc}")
+        return "Internal Server Error", 500
 
 
 if __name__ == "__main__":
-    import asyncio
-
-    async def setup_webhook():
-        await telegram_app.initialize()
-        await telegram_app.bot.set_webhook(
-            url=os.environ["WEBHOOK_URL"],
-            drop_pending_updates=True,
-        )
-
-    asyncio.run(setup_webhook())
-
-    # Flask's development server is sufficient for the small Render hobby deployment.
-    app.run(host="0.0.0.0", port=PORT)
+    asyncio.run(set_webhook())
+    web.run(host="0.0.0.0", port=PORT)
