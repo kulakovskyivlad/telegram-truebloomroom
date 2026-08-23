@@ -1,45 +1,33 @@
 import os
 import re
+import json
 from difflib import SequenceMatcher
 
 import gspread
 from google.oauth2.service_account import Credentials
+from flask import Flask, request
 from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 SHEET_NAME = os.getenv("SHEET_NAME", "Склад")
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-
-# На Koyeb JSON можно передавать через переменную GOOGLE_SERVICE_ACCOUNT_JSON.
-# Локально можно оставить GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json.
-GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-GOOGLE_SERVICE_ACCOUNT_FILE = os.getenv(
-    "GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json"
-)
+PORT = int(os.getenv("PORT", "10000"))
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+
+app = Flask(__name__)
+telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
+
 
 def get_credentials():
-    if GOOGLE_SERVICE_ACCOUNT_JSON:
-        import json
-        return Credentials.from_service_account_info(
-            json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-            scopes=SCOPES,
-        )
-
-    return Credentials.from_service_account_file(
-        GOOGLE_SERVICE_ACCOUNT_FILE,
+    return Credentials.from_service_account_info(
+        json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
         scopes=SCOPES,
     )
 
@@ -74,20 +62,11 @@ def load_rows():
         rows = []
 
         for raw_row in values[header_index + 1:]:
-            product = (
-                raw_row[product_index].strip()
-                if product_index < len(raw_row)
-                else ""
-            )
-
+            product = raw_row[product_index].strip() if product_index < len(raw_row) else ""
             if not product:
                 continue
 
-            remaining = (
-                raw_row[remaining_index].strip()
-                if remaining_index < len(raw_row)
-                else ""
-            )
+            remaining = raw_row[remaining_index].strip() if remaining_index < len(raw_row) else ""
 
             rows.append({
                 "Товар": product,
@@ -96,9 +75,7 @@ def load_rows():
 
         return rows
 
-    raise ValueError(
-        'На листе "Склад" не найдены колонки "Товар" и "Осталось".'
-    )
+    raise ValueError('На листе "Склад" не найдены колонки "Товар" и "Осталось".')
 
 
 def search_products(query, rows):
@@ -121,8 +98,7 @@ def search_products(query, rows):
                 score += 30
             else:
                 best = max(
-                    (SequenceMatcher(None, word, token).ratio()
-                     for token in product.split()),
+                    (SequenceMatcher(None, word, token).ratio() for token in product.split()),
                     default=0,
                 )
                 if best >= 0.75:
@@ -136,10 +112,7 @@ def search_products(query, rows):
 
 
 def parse_number(value):
-    if value is None:
-        return 0
-
-    text = str(value).strip().replace(" ", "").replace(",", ".")
+    text = str(value or "").strip().replace(" ", "").replace(",", ".")
     if not text:
         return 0
 
@@ -222,7 +195,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         message = format_results(display_query, results)
 
-        # Telegram message limit ~4096 chars.
         if len(message) <= 4000:
             await update.message.reply_text(message, parse_mode="Markdown")
         else:
@@ -243,15 +215,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-def main():
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("Bot started")
-    app.run_polling(drop_pending_updates=True)
+@app.get("/")
+def home():
+    return "Telegram stock bot is running", 200
+
+
+@app.get("/health")
+def health():
+    return "OK", 200
+
+
+@app.post("/telegram")
+async def telegram_webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "OK", 200
+
+
+@app.before_request
+async def initialize():
+    if not telegram_app.initialized:
+        await telegram_app.initialize()
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+
+    async def setup_webhook():
+        await telegram_app.initialize()
+        await telegram_app.bot.set_webhook(
+            url=os.environ["WEBHOOK_URL"],
+            drop_pending_updates=True,
+        )
+
+    asyncio.run(setup_webhook())
+
+    # Flask's development server is sufficient for the small Render hobby deployment.
+    app.run(host="0.0.0.0", port=PORT)
