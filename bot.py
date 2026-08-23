@@ -25,8 +25,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-web = Flask(__name__)
-
 
 def get_credentials():
     return Credentials.from_service_account_info(
@@ -184,18 +182,19 @@ def format_number(value):
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
-def group_results(results):
-    return {
-        "📦 СКЛАД": [r for r in results if r.get("Источник") == "📦 СКЛАД"],
-        "🌸 ЦВЕТЫ": [r for r in results if r.get("Источник") == "🌸 ЦВЕТЫ"],
-    }
+def total_for_rows(rows, source=None):
+    return sum(
+        parse_number(row.get("Осталось", ""))
+        for row in rows
+        if source is None or row.get("Источник") == source
+    )
 
 
 def format_group(title, rows):
     if not rows:
-        return f"{title}\nНичего не найдено\nИтого: 0 шт."
+        return f"{title}\nНичего не найдено\nИтого по найденному: 0 шт."
 
-    total = sum(parse_number(row.get("Осталось", "")) for row in rows)
+    total = total_for_rows(rows)
 
     lines = [
         title,
@@ -210,33 +209,40 @@ def format_group(title, rows):
 
     lines.extend([
         "",
-        f"Итого: {format_number(total)} шт.",
+        f"Итого по найденному: {format_number(total)} шт.",
     ])
 
     return "\n".join(lines)
 
 
-def format_results(query, results):
-    groups = group_results(results)
+def format_results(query, all_rows, results):
+    # Общие итоги по ВСЕМ остаткам в двух листах.
+    stock_total_all = total_for_rows(all_rows, "📦 СКЛАД")
+    flowers_total_all = total_for_rows(all_rows, "🌸 ЦВЕТЫ")
+    grand_total_all = stock_total_all + flowers_total_all
 
-    stock_total = sum(
-        parse_number(row.get("Осталось", ""))
-        for row in groups["📦 СКЛАД"]
-    )
-    flowers_total = sum(
-        parse_number(row.get("Осталось", ""))
-        for row in groups["🌸 ЦВЕТЫ"]
-    )
-    grand_total = stock_total + flowers_total
+    groups = {
+        "📦 СКЛАД": [
+            row for row in results
+            if row.get("Источник") == "📦 СКЛАД"
+        ],
+        "🌸 ЦВЕТЫ": [
+            row for row in results
+            if row.get("Источник") == "🌸 ЦВЕТЫ"
+        ],
+    }
 
     parts = [
-        f"🔎 Остатки по запросу «{query}»",
+        f"📊 ОБЩИЕ ОСТАТКИ",
+        f"📦 Склад: {format_number(stock_total_all)} шт.",
+        f"🌸 Цветы: {format_number(flowers_total_all)} шт.",
+        f"🔢 Всего: {format_number(grand_total_all)} шт.",
+        "",
+        f"🔎 Результат поиска: «{query}»",
         "",
         format_group("📦 СКЛАД", groups["📦 СКЛАД"]),
         "",
         format_group("🌸 ЦВЕТЫ", groups["🌸 ЦВЕТЫ"]),
-        "",
-        f"📊 ОБЩИЙ ИТОГ: {format_number(grand_total)} шт.",
     ]
 
     return "\n".join(parts)
@@ -267,7 +273,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = load_all_rows()
 
         if not query:
-            # Показываем все позиции с ненулевым остатком.
             results = [
                 row
                 for row in rows
@@ -284,7 +289,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             results = search_products(query, rows)
             display_query = query
 
-        message = format_results(display_query, results)
+        message = format_results(display_query, rows, results)
 
         if len(message) <= 4000:
             await update.message.reply_text(message)
@@ -345,6 +350,9 @@ async def process_update(data):
         await application.process_update(update)
     finally:
         await application.shutdown()
+
+
+web = Flask(__name__)
 
 
 @web.get("/")
