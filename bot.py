@@ -593,274 +593,265 @@ def parse_reservation(
     active_lottery_numbers=None,
 ):
     """
-    Понимает естественные варианты:
+    Гибкий разбор заявок на лото.
+
+    Поддерживает:
 
     5
-    5,6,8
-    5 6 8
+    5 6 7
+    5,6,7
 
-    Иванов 5,6,8
-    Иванов 5 6 8
+    5 Иванов
 
     5 Аня, 6 Влад, 8 Петя
-    5 Аня 6 Влад 8 Петя
 
+    лот 165
+    5
+
+    лот 165
+    5 Аня, 6 Влад
+
+    Также:
+    165 5
     165 5,6
-    лот 165 5,6
+    165 5 Аня, 6 Влад
 
-    Возвращает:
+    Если имя не указано:
+    name = None
 
-    {
-        "lottery_number": int | None,
-        "assignments": [
-            {
-                "number": 5,
-                "name": "Аня" | None
-            }
-        ]
-    }
-
-    None — если сообщение не похоже на заявку.
+    Тогда handle_lottery_reservation()
+    использует имя Telegram-пользователя.
     """
 
-    original = str(text or "").strip()
+    text = str(text or "").strip()
 
-    if not original:
+    if not text:
         return None
 
-    body = original
+    active_lottery_numbers = [
+        int(number)
+        for number in (
+            active_lottery_numbers or []
+        )
+    ]
 
-    active_lottery_numbers = (
-        active_lottery_numbers or []
-    )
+    lottery_number = None
 
-    explicit_lottery = None
-
-    # --------------------------------------------------------
-    # Явно указано: "лот 165"
-    # --------------------------------------------------------
+    # ========================================================
+    # Ищем "лот 165" или "лот №165"
+    # ========================================================
 
     lottery_match = re.search(
-        r"^\s*лот\s*№?\s*(\d+)\b",
-        body,
+        r"\bлот\s*№?\s*(\d+)\b",
+        text,
         flags=re.IGNORECASE,
     )
 
     if lottery_match:
-        explicit_lottery = int(
+        lottery_number = int(
             lottery_match.group(1)
         )
 
-        body = (
-            body[:lottery_match.start()]
-            +
-            body[lottery_match.end():]
+        text = (
+            text[:lottery_match.start()]
+            + " "
+            + text[lottery_match.end():]
         ).strip()
 
-    # --------------------------------------------------------
-    # Убираем слово "номер"/"номерки"
-    # --------------------------------------------------------
+    # ========================================================
+    # Убираем слово "номер"
+    #
+    # номер 5
+    # номер 5,6,7
+    # ========================================================
 
-    body = re.sub(
-        r"^\s*(?:номерки|номер|номера)\s*[:\-]?\s*",
+    text = re.sub(
+        r"^\s*номер\s+",
         "",
-        body,
+        text,
         flags=re.IGNORECASE,
     ).strip()
 
-    # --------------------------------------------------------
-    # Если лото указано просто числом:
-    #
-    # 165 5,6
-    #
-    # и 165 является номером активного лото.
-    # --------------------------------------------------------
-
-    tokens = re.split(
-        r"[\s,;]+",
-        body.strip(),
-    )
-
-    tokens = [
-        token
-        for token in tokens
-        if token
-    ]
-
-    if (
-        explicit_lottery is None
-        and len(tokens) >= 2
-        and re.fullmatch(
-            r"\d+",
-            tokens[0],
-        )
-    ):
-        first_number = int(tokens[0])
-
-        if first_number in active_lottery_numbers:
-            explicit_lottery = first_number
-
-            # Убираем первое число — это номер лото.
-            body = re.sub(
-                r"^\s*\d+\s*",
-                "",
-                body,
-                count=1,
-            ).strip()
-
-    # --------------------------------------------------------
-    # Извлекаем номера
-    # --------------------------------------------------------
-
-    number_matches = list(
-        re.finditer(
-            r"(?<!\d)(?:№\s*)?(\d{1,3})(?!\d)",
-            body,
-        )
-    )
-
-    if not number_matches:
+    if not text:
         return None
 
-    # --------------------------------------------------------
-    # Текст до первого номера.
-    # Например:
+    # ========================================================
+    # Чисто цифровой вариант:
     #
-    # Иванов 5,6
+    # 5
+    # 5 6 7
+    # 5,6,7
     #
-    # --------------------------------------------------------
+    # Все номера записываются на автора сообщения.
+    # ========================================================
 
-    prefix = clean_name(
-        body[
-            :number_matches[0].start()
+    if re.fullmatch(
+        r"\d+(?:[\s,]+\d+)*",
+        text,
+    ):
+        numbers = [
+            int(value)
+            for value in re.findall(
+                r"\d+",
+                text,
+            )
         ]
-    )
 
-    # --------------------------------------------------------
-    # Проверяем prefix.
-    # --------------------------------------------------------
-
-    if prefix:
-        prefix_words = normalize(
-            prefix
-        ).split()
-
-        if any(
-            word in RESERVATION_STOP_WORDS
-            for word in prefix_words
+        # Если активно два лото и человек написал:
+        #
+        # 165 5
+        #
+        # где 165 — номер лото, а 5 — номерок.
+        if (
+            lottery_number is None
+            and len(active_lottery_numbers) > 1
+            and len(numbers) > 1
+            and numbers[0]
+            in active_lottery_numbers
         ):
+            lottery_number = numbers[0]
+            numbers = numbers[1:]
+
+        if not numbers:
             return None
+
+        # Один номер нельзя указать дважды.
+        if len(numbers) != len(set(numbers)):
+            return None
+
+        return {
+            "lottery_number": lottery_number,
+            "assignments": [
+                {
+                    "number": number,
+                    "name": None,
+                }
+                for number in numbers
+            ],
+        }
+
+    # ========================================================
+    # Варианты:
+    #
+    # 5 Аня
+    # 6 Влад
+    #
+    # 5 Аня, 6 Влад, 8 Петя
+    #
+    # 5,6 Влад
+    # ========================================================
+
+    parts = [
+        part.strip()
+        for part in re.split(
+            r",|\n",
+            text,
+        )
+        if part.strip()
+    ]
 
     assignments = []
 
-    names_found = []
+    for part in parts:
 
-    for index, match in enumerate(
-        number_matches
-    ):
-        number = int(
-            match.group(1)
+        # ----------------------------------------------------
+        # Номер/номера + имя
+        #
+        # 5 Аня
+        # 5,6 Влад
+        # ----------------------------------------------------
+
+        match = re.fullmatch(
+            r"((?:\d+\s*,\s*)*\d+)"
+            r"(?:\s+)(.+)",
+            part,
+            flags=re.IGNORECASE,
         )
 
-        if index + 1 < len(
-            number_matches
-        ):
-            segment = body[
-                match.end():
-                number_matches[index + 1].start()
-            ]
-        else:
-            segment = body[
-                match.end():
-            ]
+        if match:
 
-        segment = clean_name(
-            segment
-        )
+            numbers_text = match.group(1)
+            name = match.group(2).strip()
 
-        # Если между номерами ничего нет —
-        # имени для конкретного номера нет.
-        name = segment or None
-
-        if name:
-            words = normalize(
-                name
-            ).split()
-
-            if any(
-                word in RESERVATION_STOP_WORDS
-                for word in words
-            ):
+            if not name:
                 return None
 
-            names_found.append(name)
+            numbers = [
+                int(value)
+                for value in re.findall(
+                    r"\d+",
+                    numbers_text,
+                )
+            ]
 
-        assignments.append({
-            "number": number,
-            "name": name,
-        })
+            for number in numbers:
+                assignments.append({
+                    "number": number,
+                    "name": name,
+                })
 
-    # --------------------------------------------------------
-    # Если имя стоит перед номерами:
-    #
-    # Иванов 5,6,8
-    #
-    # применяем его ко всем.
-    # --------------------------------------------------------
-
-    if prefix:
-        for assignment in assignments:
-            if not assignment["name"]:
-                assignment["name"] = prefix
-
-    # --------------------------------------------------------
-    # Если имя стоит после всех номеров:
-    #
-    # 5,6,8 Иванов
-    #
-    # и имя найдено только у последнего номера,
-    # применяем его ко всем.
-    # --------------------------------------------------------
-
-    if (
-        not prefix
-        and len(names_found) == 1
-        and len(assignments) > 1
-    ):
-        common_name = names_found[0]
-
-        for assignment in assignments:
-            assignment["name"] = common_name
-
-    # --------------------------------------------------------
-    # Убираем дубликаты номеров,
-    # сохраняя первое появление.
-    # --------------------------------------------------------
-
-    seen = set()
-    unique_assignments = []
-
-    for assignment in assignments:
-        number = assignment["number"]
-
-        if number in seen:
             continue
 
-        seen.add(number)
+        # ----------------------------------------------------
+        # Просто номер внутри смешанного сообщения
+        # ----------------------------------------------------
 
-        unique_assignments.append(
-            assignment
-        )
+        if re.fullmatch(
+            r"\d+",
+            part,
+        ):
+            assignments.append({
+                "number": int(part),
+                "name": None,
+            })
 
-    if not unique_assignments:
+            continue
+
+        # Непонятный формат — бот молчит.
+        return None
+
+    if not assignments:
+        return None
+
+    # ========================================================
+    # Если два лото и написано:
+    #
+    # 165 5 Аня
+    #
+    # то первое число считаем номером лото.
+    # ========================================================
+
+    if (
+        lottery_number is None
+        and len(active_lottery_numbers) > 1
+        and assignments
+        and assignments[0]["number"]
+        in active_lottery_numbers
+        and len(assignments) > 1
+    ):
+        lottery_number = assignments[0]["number"]
+        assignments = assignments[1:]
+
+    if not assignments:
+        return None
+
+    # ========================================================
+    # Проверяем, нет ли повторяющихся номерков
+    # в одной заявке.
+    # ========================================================
+
+    numbers = [
+        item["number"]
+        for item in assignments
+    ]
+
+    if len(numbers) != len(set(numbers)):
         return None
 
     return {
-        "lottery_number": explicit_lottery,
-        "assignments": unique_assignments,
+        "lottery_number": lottery_number,
+        "assignments": assignments,
     }
-
-
 # ============================================================
 # ЛОТО — СОХРАНЕНИЕ В GOOGLE SHEETS
 # ============================================================
