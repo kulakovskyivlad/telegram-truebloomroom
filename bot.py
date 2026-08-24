@@ -20,13 +20,14 @@ PORT = int(os.getenv("PORT", "10000"))
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 RENDER_EXTERNAL_URL = os.environ["RENDER_EXTERNAL_URL"]
 
-# Telegram IDs allowed to use the bot, separated by commas.
-# Example: 123456789,987654321
 ALLOWED_USER_IDS = {
     int(value.strip())
     for value in os.getenv("ALLOWED_USER_IDS", "").split(",")
     if value.strip().isdigit()
 }
+
+# Optional test-group restriction. If set, lottery processing is limited to this chat.
+LOTTERY_CHAT_ID = os.getenv("LOTTERY_CHAT_ID", "").strip()
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -35,65 +36,54 @@ SCOPES = [
 
 web = Flask(__name__)
 
+# In-memory lottery state for the test.
+# The active lottos are discovered from admin posts and kept until all numbers are taken.
+lotteries = {}
+
 
 def get_credentials():
     return Credentials.from_service_account_info(
-        json.loads(GOOGLE_SERVICE_ACCOUNT_JSON),
-        scopes=SCOPES,
+        json.loads(GOOGLE_SERVICE_ACCOUNT_JSON), scopes=SCOPES
     )
 
 
 def get_spreadsheet():
-    client = gspread.authorize(get_credentials())
-    return client.open_by_key(SPREADSHEET_ID)
+    return gspread.authorize(get_credentials()).open_by_key(SPREADSHEET_ID)
 
 
 def normalize(text):
     text = str(text or "").lower().replace("ё", "е")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def find_header_row(values, required_columns, max_rows=30):
-    required = {normalize(column) for column in required_columns}
-    for header_index, raw_header in enumerate(values[:max_rows]):
-        headers = {normalize(cell) for cell in raw_header}
-        if required.issubset(headers):
-            return header_index
+    required = {normalize(c) for c in required_columns}
+    for i, row in enumerate(values[:max_rows]):
+        if required.issubset({normalize(x) for x in row}):
+            return i
     return None
 
 
 def load_sheet_rows(sheet_name, product_column, remaining_column, category):
-    spreadsheet = get_spreadsheet()
-    worksheet = spreadsheet.worksheet(sheet_name)
-    values = worksheet.get_all_values()
-
+    values = get_spreadsheet().worksheet(sheet_name).get_all_values()
     if not values:
         return []
 
     header_index = find_header_row(values, [product_column, remaining_column])
     if header_index is None:
-        raise ValueError(
-            f'На листе "{sheet_name}" не найдены колонки '
-            f'"{product_column}" и "{remaining_column}".'
-        )
+        raise ValueError(f'Не найдены колонки на листе "{sheet_name}"')
 
-    headers = [normalize(cell) for cell in values[header_index]]
-    product_index = headers.index(normalize(product_column))
-    remaining_index = headers.index(normalize(remaining_column))
+    headers = [normalize(x) for x in values[header_index]]
+    pi = headers.index(normalize(product_column))
+    ri = headers.index(normalize(remaining_column))
 
     rows = []
-    for raw_row in values[header_index + 1:]:
-        product = raw_row[product_index].strip() if product_index < len(raw_row) else ""
+    for row in values[header_index + 1:]:
+        product = row[pi].strip() if pi < len(row) else ""
         if not product:
             continue
-        remaining = raw_row[remaining_index].strip() if remaining_index < len(raw_row) else ""
-        rows.append({
-            "Товар": product,
-            "Осталось": remaining,
-            "Источник": category,
-        })
-
+        remaining = row[ri].strip() if ri < len(row) else ""
+        rows.append({"Товар": product, "Осталось": remaining, "Источник": category})
     return rows
 
 
@@ -106,129 +96,300 @@ def load_all_rows():
 
 def search_products(query, rows):
     query = normalize(query)
-    words = query.split()
     scored = []
-
     for row in rows:
-        product = normalize(row.get("Товар", ""))
-        if not product:
-            continue
-
+        product = normalize(row["Товар"])
         score = 100 if query in product else 0
-        for word in words:
+        for word in query.split():
             if word in product:
                 score += 30
             else:
                 best = max(
                     (SequenceMatcher(None, word, token).ratio()
-                     for token in product.split()),
-                    default=0,
+                     for token in product.split()), default=0
                 )
                 if best >= 0.75:
                     score += 15
-
-        if score > 0:
+        if score:
             scored.append((score, product, row))
-
     scored.sort(key=lambda x: (-x[0], x[1]))
-    return [item[2] for item in scored]
+    return [x[2] for x in scored]
 
 
 def parse_number(value):
     text = str(value or "").strip().replace(" ", "").replace(",", ".")
-    match = re.search(r"-?\d+(?:\.\d+)?", text)
-    if not match:
-        return 0
-    try:
-        return float(match.group())
-    except ValueError:
-        return 0
+    m = re.search(r"-?\d+(?:\.\d+)?", text)
+    return float(m.group()) if m else 0
 
 
 def format_number(value):
-    if float(value).is_integer():
-        return str(int(value))
-    return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(int(value)) if float(value).is_integer() else f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def total_for_rows(rows, source=None):
     return sum(
-        parse_number(row.get("Осталось", ""))
-        for row in rows
-        if source is None or row.get("Источник") == source
+        parse_number(r["Осталось"])
+        for r in rows
+        if source is None or r["Источник"] == source
     )
 
 
 def format_group(title, rows):
     if not rows:
         return f"{title}\nНичего не найдено\nИтого по найденному: 0 шт."
-
-    total = total_for_rows(rows)
     lines = [title, f"Позиций: {len(rows)}", ""]
-    for row in rows:
-        product = str(row.get("Товар", "")).strip()
-        remaining = str(row.get("Осталось", "")).strip() or "—"
-        lines.append(f"• {product} — {remaining} шт.")
-    lines.extend(["", f"Итого по найденному: {format_number(total)} шт."])
+    for r in rows:
+        lines.append(f'• {r["Товар"]} — {r["Осталось"] or "—"} шт.')
+    lines += ["", f'Итого по найденному: {format_number(total_for_rows(rows))} шт.']
     return "\n".join(lines)
 
 
 def format_results(query, all_rows, results):
-    stock_total = total_for_rows(all_rows, "📦 СКЛАД")
-    flowers_total = total_for_rows(all_rows, "🌸 ЦВЕТЫ")
-
-    stock_results = [r for r in results if r.get("Источник") == "📦 СКЛАД"]
-    flower_results = [r for r in results if r.get("Источник") == "🌸 ЦВЕТЫ"]
-
+    stock = total_for_rows(all_rows, "📦 СКЛАД")
+    flowers = total_for_rows(all_rows, "🌸 ЦВЕТЫ")
     return "\n".join([
         "📊 ОБЩИЕ ОСТАТКИ",
-        f"📦 Склад: {format_number(stock_total)} шт.",
-        f"🌸 Цветы: {format_number(flowers_total)} шт.",
-        f"🔢 Всего: {format_number(stock_total + flowers_total)} шт.",
+        f"📦 Склад: {format_number(stock)} шт.",
+        f"🌸 Цветы: {format_number(flowers)} шт.",
+        f"🔢 Всего: {format_number(stock + flowers)} шт.",
         "",
         f"🔎 Результат поиска: «{query}»",
         "",
-        format_group("📦 СКЛАД", stock_results),
+        format_group("📦 СКЛАД", [r for r in results if r["Источник"] == "📦 СКЛАД"]),
         "",
-        format_group("🌸 ЦВЕТЫ", flower_results),
+        format_group("🌸 ЦВЕТЫ", [r for r in results if r["Источник"] == "🌸 ЦВЕТЫ"]),
     ])
 
 
-def is_allowed(update):
+def lottery_chat_allowed(update):
+    if not LOTTERY_CHAT_ID:
+        return True
+    return str(update.effective_chat.id) == LOTTERY_CHAT_ID
+
+
+def is_allowed_user(update):
     user = update.effective_user
     return user is not None and user.id in ALLOWED_USER_IDS
 
 
-async def deny(update):
-    if update.message:
-        await update.message.reply_text("🔒 У вас нет доступа к этому боту.")
+def is_admin_message(update):
+    # Telegram exposes sender_chat for channel posts. For ordinary group posts,
+    # verify the sender's administrator status asynchronously in the handler.
+    return bool(update.effective_user)
+
+
+def extract_lottery(text):
+    """
+    Detect an admin-created lottery post whose text starts with:
+    Лото №165
+
+    Numbers are collected from lines containing a standalone number 1..999,
+    optionally followed by any text. This matches the user's numbered list.
+    """
+    if not text:
+        return None
+
+    lines = str(text).splitlines()
+    if not lines:
+        return None
+
+    first = lines[0].strip()
+    match = re.match(r"^лото\s*№\s*(\d+)\s*$", normalize(first))
+    if not match:
+        return None
+
+    lottery_number = int(match.group(1))
+    numbers = set()
+
+    for line in lines[1:]:
+        # Accept: "1", "1 🌸 Лисюк", "10 — свободен"
+        m = re.match(r"^\s*(\d{1,3})(?:\s|$|[🌸🪷🌿\-—:.)])", line)
+        if m:
+            numbers.add(int(m.group(1)))
+
+    # Require at least 2 numbers so ordinary "Лото №..." text is not treated as a lottery.
+    if len(numbers) < 2:
+        return None
+
+    return lottery_number, sorted(numbers)
+
+
+def format_lottery(lot):
+    lines = [f'🤖 ЛОТО №{lot["number"]}', ""]
+    for n in lot["numbers"]:
+        owner = lot["owners"].get(n)
+        lines.append(f"{n} — {owner if owner else 'свободен'}")
+    free = sum(1 for n in lot["numbers"] if n not in lot["owners"])
+    if free == 0:
+        lines += ["", "🔴 ЛОТО ЗАКРЫТО", "Все номерки заняты."]
+    else:
+        lines += ["", f"🟢 Свободно: {free}"]
+    return "\n".join(lines)
+
+
+def parse_reservation(text):
+    """
+    Strictly accepts exactly:
+    лот 165
+    номер 4,5,6
+    имя Влад
+
+    Whitespace/case are flexible; the three lines and labels are mandatory.
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) != 3:
+        return None
+
+    m_lot = re.fullmatch(r"лот\s+(\d+)", normalize(lines[0]))
+    m_num = re.fullmatch(r"номер\s+(\d+(?:\s*,\s*\d+)*)", normalize(lines[1]))
+    m_name = re.fullmatch(r"имя\s+(.+)", lines[2], flags=re.IGNORECASE)
+
+    if not (m_lot and m_num and m_name):
+        return None
+
+    nums = [int(x.strip()) for x in m_num.group(1).split(",")]
+    if not nums or len(nums) != len(set(nums)):
+        return None
+
+    name = m_name.group(1).strip()
+    if not name or len(name) > 100:
+        return None
+
+    return int(m_lot.group(1)), nums, name
+
+
+async def create_lottery_from_admin_post(update):
+    if not update.message:
+        return
+
+    text = update.message.text or update.message.caption or ""
+    found = extract_lottery(text)
+    if not found:
+        return
+
+    lottery_number, numbers = found
+
+    try:
+        member = await update.effective_chat.get_member(update.effective_user.id)
+        if member.status not in ("administrator", "creator"):
+            return
+    except Exception as exc:
+        print(f"ADMIN CHECK ERROR: {exc}")
+        return
+
+    # A new post with the same number replaces the previous in-memory test state.
+    lot = {
+        "number": lottery_number,
+        "numbers": numbers,
+        "owners": {},
+        "source_message_id": update.message.message_id,
+        "board_message_id": None,
+    }
+
+    board = await update.message.reply_text(format_lottery(lot))
+    lot["board_message_id"] = board.message_id
+    lotteries[lottery_number] = lot
+
+    print(f"LOTTERY CREATED: {lottery_number}, numbers={numbers}")
+
+
+async def handle_lottery_reservation(update):
+    if not update.message or not lottery_chat_allowed(update):
+        return
+
+    parsed = parse_reservation(update.message.text)
+    if not parsed:
+        return
+
+    lottery_number, requested_numbers, name = parsed
+    lot = lotteries.get(lottery_number)
+
+    if not lot:
+        await update.message.reply_text(
+            f"❌ Лото №{lottery_number} не найдено или ещё не создано."
+        )
+        return
+
+    free_numbers = [n for n in requested_numbers if n in lot["numbers"] and n not in lot["owners"]]
+    occupied = [n for n in requested_numbers if n in lot["owners"]]
+    invalid = [n for n in requested_numbers if n not in lot["numbers"]]
+
+    # Atomic reservation: if anything is wrong, do not partially book the request.
+    if invalid:
+        await update.message.reply_text(
+            "❌ В заявке есть номера, которых нет в лото: "
+            + ", ".join(map(str, invalid))
+        )
+        return
+
+    if occupied:
+        details = ", ".join(
+            f'№{n} — {lot["owners"][n]}' for n in occupied
+        )
+        await update.message.reply_text(
+            f"❌ Эти номерки уже заняты: {details}"
+        )
+        return
+
+    if not free_numbers:
+        await update.message.reply_text(
+            f"🔴 Лото №{lottery_number} уже закрыто."
+        )
+        return
+
+    for n in free_numbers:
+        lot["owners"][n] = name
+
+    try:
+        await update.get_bot().edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=lot["board_message_id"],
+            text=format_lottery(lot),
+        )
+    except Exception as exc:
+        # Do not roll back the reservation: the state remains authoritative,
+        # and the next valid reservation will retry the board update.
+        print(f"LOTTERY BOARD UPDATE ERROR: {exc}")
+
+    free_count = sum(1 for n in lot["numbers"] if n not in lot["owners"])
+
+    if free_count == 0:
+        await update.message.reply_text(
+            f"🔴 Лото №{lottery_number} закрыто.\n"
+            f"Номерки {', '.join(map(str, free_numbers))} записаны за {name}.\n"
+            "Все номерки заняты."
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Лото №{lottery_number}: "
+            f"номерки {', '.join(map(str, free_numbers))} записаны за {name}."
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await deny(update)
+    if not is_allowed_user(update):
+        await update.message.reply_text("🔒 У вас нет доступа к этому боту.")
         return
-
     await update.message.reply_text(
         "Привет! 👋\n\n"
-        "Напиши:\n"
-        "• остатки — все остатки отдельно по складу и цветам\n"
-        "• остатки лейка — лейки отдельно по складу и цветам\n"
-        "• остатки роза — розы отдельно по складу и цветам"
+        "Остатки: «остатки» или «остатки лейка».\n\n"
+        "Для лото участник должен писать строго:\n"
+        "лот 165\n"
+        "номер 4,5,6\n"
+        "имя Влад"
     )
 
 
 async def my_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Anyone may use /id so an administrator can learn a user's numeric ID.
     if update.effective_user:
-        await update.message.reply_text(
-            f"Ваш Telegram ID: {update.effective_user.id}"
-        )
+        await update.message.reply_text(f"Ваш Telegram ID: {update.effective_user.id}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update):
-        await deny(update)
+    # First, try the strict lottery format in the test group.
+    await handle_lottery_reservation(update)
+
+    if not is_allowed_user(update):
         return
 
     text = normalize(update.message.text)
@@ -238,15 +399,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         rows = load_all_rows()
-
         if not query:
-            results = [
-                row for row in rows
-                if parse_number(row.get("Осталось", "")) != 0
-            ]
-            results.sort(key=lambda row: (
-                0 if row.get("Источник") == "📦 СКЛАД" else 1,
-                normalize(row.get("Товар", "")),
+            results = [r for r in rows if parse_number(r["Осталось"]) != 0]
+            results.sort(key=lambda r: (
+                0 if r["Источник"] == "📦 СКЛАД" else 1,
+                normalize(r["Товар"])
             ))
             display_query = "все товары"
         else:
@@ -254,7 +411,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             display_query = query
 
         message = format_results(display_query, rows, results)
-
         if len(message) <= 4000:
             await update.message.reply_text(message)
         else:
@@ -266,45 +422,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 current += line + "\n"
             if current:
                 await update.message.reply_text(current)
-
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}")
-        await update.message.reply_text(
-            '⚠️ Не удалось получить данные из Google Таблицы. '
-            'Проверь листы "Склад" и "Цветы".'
-        )
+        await update.message.reply_text("⚠️ Не удалось получить данные из Google Таблицы.")
+
+
+async def handle_admin_lottery_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not lottery_chat_allowed(update):
+        return
+    await create_lottery_from_admin_post(update)
 
 
 def build_application():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).updater(None).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("id", my_id))
+
+    # Admin lottery posts must be inspected before the generic text handler.
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+        MessageHandler(filters.TEXT | filters.CAPTION, handle_admin_lottery_message),
+        group=0,
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message),
+        group=1,
     )
     return application
 
 
 async def set_webhook():
-    application = build_application()
-    await application.initialize()
+    app = build_application()
+    await app.initialize()
     try:
-        await application.bot.set_webhook(
+        await app.bot.set_webhook(
             url=f"{RENDER_EXTERNAL_URL}/telegram",
             drop_pending_updates=True,
         )
     finally:
-        await application.shutdown()
+        await app.shutdown()
 
 
 async def process_update(data):
-    application = build_application()
-    await application.initialize()
+    app = build_application()
+    await app.initialize()
     try:
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
+        update = Update.de_json(data, app.bot)
+        await app.process_update(update)
     finally:
-        await application.shutdown()
+        await app.shutdown()
 
 
 @web.get("/")
