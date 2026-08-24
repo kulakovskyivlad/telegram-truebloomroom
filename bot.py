@@ -522,14 +522,11 @@ def parse_reservation(text):
         lottery_match.group(1)
     )
 
-   requested_numbers = [
-    int(value)
-    for value in re.split(
-        r"[,\s]+",
-        numbers_match.group(1).strip()
-    )
-    if value
-   ]
+    requested_numbers = [
+        int(value)
+        for value in re.split(r"[,\s]+", numbers_match.group(1).strip())
+        if value
+    ]
 
     # Дубликаты номеров в одной заявке запрещаем.
     if (
