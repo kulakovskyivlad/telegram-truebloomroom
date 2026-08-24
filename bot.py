@@ -501,8 +501,8 @@ def parse_reservation(text):
     )
 
     numbers_match = re.fullmatch(
-        r"номер\s+(\d+(?:\s*,\s*\d+)*)",
-        normalize(lines[1])
+    r"номер\s+(\d+(?:\s*[, ]\s*\d+)*)",
+    normalize(lines[1])
     )
 
     name_match = re.fullmatch(
@@ -522,10 +522,13 @@ def parse_reservation(text):
         lottery_match.group(1)
     )
 
-    requested_numbers = [
-        int(value.strip())
-        for value in
-        numbers_match.group(1).split(",")
+   requested_numbers = [
+    int(value)
+    for value in re.split(
+        r"[,\s]+",
+        numbers_match.group(1).strip()
+    )
+    if value
     ]
 
     # Дубликаты номеров в одной заявке запрещаем.
