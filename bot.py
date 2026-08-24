@@ -529,7 +529,7 @@ def parse_reservation(text):
         numbers_match.group(1).strip()
     )
     if value
-    ]
+   ]
 
     # Дубликаты номеров в одной заявке запрещаем.
     if (
