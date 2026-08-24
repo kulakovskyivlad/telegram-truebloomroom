@@ -370,6 +370,15 @@ def lottery_chat_allowed(chat_id):
     return str(chat_id) == LOTTERY_CHAT_ID
 
 
+def is_allowed_user(update):
+    user = update.effective_user
+
+    return (
+        user is not None
+        and user.id in ALLOWED_USER_IDS
+    )
+
+
 def extract_lottery(text):
     """
     Ищем пост администратора, который начинается:
