@@ -68,19 +68,23 @@ def get_spreadsheet():
 def get_lottery_worksheet():
     """
     Возвращает лист для хранения состояния лото.
-    Если листа ещё нет — создаёт его автоматически.
+    Если листа ещё нет — создаёт его.
+
+    Дополнительно используется колонка reservation_meta_json:
+    в ней сохраняем Telegram ID человека, который сделал заявку,
+    и информацию о том, был ли номер записан на самого покупателя.
     """
 
     spreadsheet = get_spreadsheet()
 
     try:
-        return spreadsheet.worksheet(LOTTERY_STATE_SHEET)
+        worksheet = spreadsheet.worksheet(LOTTERY_STATE_SHEET)
 
     except gspread.WorksheetNotFound:
         worksheet = spreadsheet.add_worksheet(
             title=LOTTERY_STATE_SHEET,
             rows=100,
-            cols=8,
+            cols=9,
         )
 
         worksheet.append_row([
@@ -92,9 +96,47 @@ def get_lottery_worksheet():
             "slots_json",
             "updated_at",
             "source_text",
+            "reservation_meta_json",
         ])
 
         return worksheet
+
+    # Если лист уже существует со старой структурой,
+    # добавляем недостающую колонку.
+    if worksheet.col_count < 9:
+        worksheet.add_cols(9 - worksheet.col_count)
+
+    values = worksheet.get_all_values()
+
+    if not values:
+        worksheet.update(
+            "A1:I1",
+            [[
+                "lot_number",
+                "chat_id",
+                "source_message_id",
+                "board_message_id",
+                "active",
+                "slots_json",
+                "updated_at",
+                "source_text",
+                "reservation_meta_json",
+            ]],
+        )
+
+    else:
+        headers = [
+            normalize(x)
+            for x in values[0]
+        ]
+
+        if "reservation_meta_json" not in headers:
+            worksheet.update(
+                "I1",
+                [["reservation_meta_json"]],
+            )
+
+    return worksheet
 
 
 # ============================================================
@@ -477,85 +519,346 @@ def format_lottery(lot):
     return "\n".join(lines)
 
 
-def parse_reservation(text):
+def get_user_display_name(user):
     """
-    Принимаются только 3 строки:
-
-    лот 165
-    номер 4,5,6
-    имя Влад
-
-    Также:
-
-    лот 165
-    номер 4 5 6
-    имя Влад
-
-    И смешанный вариант:
-
-    номер 4, 5 6
-
-    Другой текст бот игнорирует.
+    Имя человека из Telegram.
     """
 
-    lines = [
-        line.strip()
-        for line in str(text or "").splitlines()
-        if line.strip()
-    ]
+    if not user:
+        return "Пользователь"
 
-    if len(lines) != 3:
+    parts = []
+
+    if user.first_name:
+        parts.append(
+            user.first_name.strip()
+        )
+
+    if user.last_name:
+        parts.append(
+            user.last_name.strip()
+        )
+
+    if parts:
+        return " ".join(parts)
+
+    if user.username:
+        return user.username
+
+    return f"Пользователь {user.id}"
+
+
+def clean_name(value):
+    """
+    Очищает имя от лишних знаков.
+    """
+
+    value = str(value or "").strip()
+
+    value = re.sub(
+        r"^[,;:.\-—–]+",
+        "",
+        value,
+    )
+
+    value = re.sub(
+        r"[,;:.\-—–]+$",
+        "",
+        value,
+    )
+
+    return value.strip()
+
+
+RESERVATION_STOP_WORDS = {
+    "лот",
+    "номер",
+    "номера",
+    "номерок",
+    "номерки",
+    "возьму",
+    "беру",
+    "хочу",
+    "забронируйте",
+    "забронировать",
+    "запишите",
+    "записать",
+    "мне",
+    "пожалуйста",
+}
+
+
+def parse_reservation(
+    text,
+    active_lottery_numbers=None,
+):
+    """
+    Понимает естественные варианты:
+
+    5
+    5,6,8
+    5 6 8
+
+    Иванов 5,6,8
+    Иванов 5 6 8
+
+    5 Аня, 6 Влад, 8 Петя
+    5 Аня 6 Влад 8 Петя
+
+    165 5,6
+    лот 165 5,6
+
+    Возвращает:
+
+    {
+        "lottery_number": int | None,
+        "assignments": [
+            {
+                "number": 5,
+                "name": "Аня" | None
+            }
+        ]
+    }
+
+    None — если сообщение не похоже на заявку.
+    """
+
+    original = str(text or "").strip()
+
+    if not original:
         return None
 
-    lottery_match = re.fullmatch(
-        r"лот\s+(\d+)",
-        normalize(lines[0]),
+    body = original
+
+    active_lottery_numbers = (
+        active_lottery_numbers or []
     )
 
-    numbers_match = re.fullmatch(
-        r"номер\s+(\d+(?:\s*[, ]\s*\d+)*)",
-        normalize(lines[1]),
-    )
+    explicit_lottery = None
 
-    name_match = re.fullmatch(
-        r"имя\s+(.+)",
-        lines[2],
+    # --------------------------------------------------------
+    # Явно указано: "лот 165"
+    # --------------------------------------------------------
+
+    lottery_match = re.search(
+        r"^\s*лот\s*№?\s*(\d+)\b",
+        body,
         flags=re.IGNORECASE,
     )
 
-    if not (
-        lottery_match
-        and numbers_match
-        and name_match
-    ):
-        return None
-
-    requested_numbers = [
-        int(value)
-        for value in re.split(
-            r"[,\s]+",
-            numbers_match.group(1).strip(),
+    if lottery_match:
+        explicit_lottery = int(
+            lottery_match.group(1)
         )
-        if value
+
+        body = (
+            body[:lottery_match.start()]
+            +
+            body[lottery_match.end():]
+        ).strip()
+
+    # --------------------------------------------------------
+    # Убираем слово "номер"/"номерки"
+    # --------------------------------------------------------
+
+    body = re.sub(
+        r"^\s*(?:номерки|номер|номера)\s*[:\-]?\s*",
+        "",
+        body,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # --------------------------------------------------------
+    # Если лото указано просто числом:
+    #
+    # 165 5,6
+    #
+    # и 165 является номером активного лото.
+    # --------------------------------------------------------
+
+    tokens = re.split(
+        r"[\s,;]+",
+        body.strip(),
+    )
+
+    tokens = [
+        token
+        for token in tokens
+        if token
     ]
 
     if (
-        not requested_numbers
-        or len(requested_numbers)
-        != len(set(requested_numbers))
+        explicit_lottery is None
+        and len(tokens) >= 2
+        and re.fullmatch(
+            r"\d+",
+            tokens[0],
+        )
     ):
-        return None
+        first_number = int(tokens[0])
 
-    name = name_match.group(1).strip()
+        if first_number in active_lottery_numbers:
+            explicit_lottery = first_number
 
-    if not name or len(name) > 100:
-        return None
+            # Убираем первое число — это номер лото.
+            body = re.sub(
+                r"^\s*\d+\s*",
+                "",
+                body,
+                count=1,
+            ).strip()
 
-    return (
-        int(lottery_match.group(1)),
-        requested_numbers,
-        name,
+    # --------------------------------------------------------
+    # Извлекаем номера
+    # --------------------------------------------------------
+
+    number_matches = list(
+        re.finditer(
+            r"(?<!\d)(?:№\s*)?(\d{1,3})(?!\d)",
+            body,
+        )
     )
+
+    if not number_matches:
+        return None
+
+    # --------------------------------------------------------
+    # Текст до первого номера.
+    # Например:
+    #
+    # Иванов 5,6
+    #
+    # --------------------------------------------------------
+
+    prefix = clean_name(
+        body[
+            :number_matches[0].start()
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Проверяем prefix.
+    # --------------------------------------------------------
+
+    if prefix:
+        prefix_words = normalize(
+            prefix
+        ).split()
+
+        if any(
+            word in RESERVATION_STOP_WORDS
+            for word in prefix_words
+        ):
+            return None
+
+    assignments = []
+
+    names_found = []
+
+    for index, match in enumerate(
+        number_matches
+    ):
+        number = int(
+            match.group(1)
+        )
+
+        if index + 1 < len(
+            number_matches
+        ):
+            segment = body[
+                match.end():
+                number_matches[index + 1].start()
+            ]
+        else:
+            segment = body[
+                match.end():
+            ]
+
+        segment = clean_name(
+            segment
+        )
+
+        # Если между номерами ничего нет —
+        # имени для конкретного номера нет.
+        name = segment or None
+
+        if name:
+            words = normalize(
+                name
+            ).split()
+
+            if any(
+                word in RESERVATION_STOP_WORDS
+                for word in words
+            ):
+                return None
+
+            names_found.append(name)
+
+        assignments.append({
+            "number": number,
+            "name": name,
+        })
+
+    # --------------------------------------------------------
+    # Если имя стоит перед номерами:
+    #
+    # Иванов 5,6,8
+    #
+    # применяем его ко всем.
+    # --------------------------------------------------------
+
+    if prefix:
+        for assignment in assignments:
+            if not assignment["name"]:
+                assignment["name"] = prefix
+
+    # --------------------------------------------------------
+    # Если имя стоит после всех номеров:
+    #
+    # 5,6,8 Иванов
+    #
+    # и имя найдено только у последнего номера,
+    # применяем его ко всем.
+    # --------------------------------------------------------
+
+    if (
+        not prefix
+        and len(names_found) == 1
+        and len(assignments) > 1
+    ):
+        common_name = names_found[0]
+
+        for assignment in assignments:
+            assignment["name"] = common_name
+
+    # --------------------------------------------------------
+    # Убираем дубликаты номеров,
+    # сохраняя первое появление.
+    # --------------------------------------------------------
+
+    seen = set()
+    unique_assignments = []
+
+    for assignment in assignments:
+        number = assignment["number"]
+
+        if number in seen:
+            continue
+
+        seen.add(number)
+
+        unique_assignments.append(
+            assignment
+        )
+
+    if not unique_assignments:
+        return None
+
+    return {
+        "lottery_number": explicit_lottery,
+        "assignments": unique_assignments,
+    }
 
 
 # ============================================================
@@ -574,10 +877,19 @@ def read_lotteries():
     """
     Загружает все активные лото из Google Таблицы.
 
-    Благодаря этому состояние не теряется после:
-    - перезапуска Render;
-    - нового deploy;
-    - изменения bot.py.
+    Сохраняется после перезапуска Render.
+
+    reservation_meta:
+    {
+        "5": {
+            "user_id": 123456,
+            "self": true
+        },
+        "6": {
+            "user_id": 123456,
+            "self": false
+        }
+    }
     """
 
     worksheet = ensure_lottery_sheet()
@@ -641,6 +953,26 @@ def read_lotteries():
                 if owner:
                     owners[int(number)] = str(owner)
 
+            # Новая информация о покупателях.
+            # Для старых записей её может не быть.
+            reservation_meta = {}
+
+            if "reservation_meta_json" in index:
+                meta_index = index[
+                    "reservation_meta_json"
+                ]
+
+                if meta_index < len(row):
+                    raw_meta = row[meta_index].strip()
+
+                    if raw_meta:
+                        try:
+                            reservation_meta = json.loads(
+                                raw_meta
+                            )
+                        except Exception:
+                            reservation_meta = {}
+
             result.append({
                 "number": int(
                     row[index["lot_number"]]
@@ -656,6 +988,7 @@ def read_lotteries():
                 ),
                 "numbers": sorted(numbers),
                 "owners": owners,
+                "reservation_meta": reservation_meta,
             })
 
         except Exception as exc:
@@ -701,6 +1034,7 @@ def save_lottery(lot, active=True):
             "slots_json",
             "updated_at",
             "source_text",
+            "reservation_meta_json",
         ])
 
         values = worksheet.get_all_values()
@@ -709,6 +1043,20 @@ def save_lottery(lot, active=True):
         normalize(x)
         for x in values[0]
     ]
+
+    # На случай старой версии листа.
+    if "reservation_meta_json" not in headers:
+        worksheet.update(
+            "I1",
+            [["reservation_meta_json"]],
+        )
+
+        values = worksheet.get_all_values()
+
+        headers = [
+            normalize(x)
+            for x in values[0]
+        ]
 
     columns = {
         name: i + 1
@@ -748,6 +1096,14 @@ def save_lottery(lot, active=True):
         ensure_ascii=False,
     )
 
+    reservation_meta_json = json.dumps(
+        lot.get(
+            "reservation_meta",
+            {},
+        ),
+        ensure_ascii=False,
+    )
+
     row_values = [
         lot["number"],
         lot["chat_id"],
@@ -762,18 +1118,19 @@ def save_lottery(lot, active=True):
             "source_text",
             "",
         ),
+        reservation_meta_json,
     ]
 
     if target_row:
         worksheet.update(
-            f"A{target_row}:H{target_row}",
+            f"A{target_row}:I{target_row}",
             [row_values],
         )
+
     else:
         worksheet.append_row(
             row_values
         )
-
 
 def close_lottery(lot):
     """
@@ -895,6 +1252,86 @@ async def create_lottery_from_admin_post(update):
 # ЛОТО — БРОНИРОВАНИЕ
 # ============================================================
 
+def parse_rename_command(text):
+    """
+    Понимает:
+
+    5 на Иванович
+    №5 на Иванович
+
+    перезапишите меня на Иванович
+    поменяйте меня на Иванович
+    мои номера на Иванович
+    """
+
+    text = str(text or "").strip()
+
+    if not text:
+        return None
+
+    # --------------------------------------------------------
+    # Конкретный номер:
+    #
+    # 5 на Иванович
+    # №5 на Иванович
+    # --------------------------------------------------------
+
+    match = re.fullmatch(
+        r"(?:№\s*)?(\d{1,3})\s+на\s+(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return {
+            "number": int(
+                match.group(1)
+            ),
+            "name": clean_name(
+                match.group(2)
+            ),
+        }
+
+    # --------------------------------------------------------
+    # Все свои номера:
+    #
+    # перезапишите меня на Иванович
+    # поменяйте меня на Иванович
+    # мои номера на Иванович
+    # --------------------------------------------------------
+
+    match = re.fullmatch(
+        r"(?:перезапишите|поменяйте)"
+        r"(?:\s+меня)?"
+        r"\s+на\s+(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return {
+            "number": None,
+            "name": clean_name(
+                match.group(1)
+            ),
+        }
+
+    match = re.fullmatch(
+        r"мои\s+номера\s+на\s+(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return {
+            "number": None,
+            "name": clean_name(
+                match.group(1)
+            ),
+        }
+
+    return None
+
 async def handle_lottery_reservation(update):
     if (
         not update.message
@@ -904,25 +1341,315 @@ async def handle_lottery_reservation(update):
     ):
         return
 
-    # Запрос должен быть именно в группе.
+    # Только групповые чаты.
     if update.effective_chat.type not in (
         "group",
         "supergroup",
     ):
         return
 
-    parsed = parse_reservation(
+    text = (
         update.message.text
-    )
+        or ""
+    ).strip()
 
-    # Если человек написал не по формату —
-    # бот ничего не делает.
-    if not parsed:
+    if not text:
         return
 
-    lottery_number, requested_numbers, name = parsed
-
     async with LOTTERY_LOCK:
+
+        # ====================================================
+        # ПЕРЕИМЕНОВАНИЕ
+        # ====================================================
+
+        rename = parse_rename_command(
+            text
+        )
+
+        if rename:
+            active_lotteries = read_lotteries()
+
+            user_id = (
+                update.effective_user.id
+                if update.effective_user
+                else None
+            )
+
+            if not user_id:
+                return
+
+            # ------------------------------------------------
+            # Конкретный номер
+            # ------------------------------------------------
+
+            if rename["number"] is not None:
+                number = rename["number"]
+
+                matching_lots = [
+                    lot
+                    for lot in active_lotteries
+                    if number in lot["numbers"]
+                    and str(
+                        lot.get(
+                            "reservation_meta",
+                            {}
+                        ).get(
+                            str(number),
+                            {}
+                        ).get(
+                            "user_id",
+                            ""
+                        )
+                    ) == str(user_id)
+                ]
+
+                if len(matching_lots) == 0:
+                    await update.message.reply_text(
+                        f"❌ Номер №{number} "
+                        "не найден среди ваших активных заявок."
+                    )
+                    return
+
+                if len(matching_lots) > 1:
+                    numbers = ", ".join(
+                        f"№{lot['number']}"
+                        for lot in matching_lots
+                    )
+
+                    await update.message.reply_text(
+                        "⚠️ Этот номер есть в нескольких активных лото: "
+                        + numbers
+                        + ".\n"
+                        "Укажите номер лото."
+                    )
+                    return
+
+                lot = matching_lots[0]
+
+                lot["owners"][number] = rename["name"]
+
+                meta = lot.get(
+                    "reservation_meta",
+                    {}
+                )
+
+                if str(number) in meta:
+                    meta[str(number)]["self"] = (
+                        normalize(
+                            rename["name"]
+                        )
+                        ==
+                        normalize(
+                            get_user_display_name(
+                                update.effective_user
+                            )
+                        )
+                    )
+
+                lot["reservation_meta"] = meta
+
+                save_lottery(
+                    lot,
+                    active=True,
+                )
+
+                try:
+                    await update.get_bot().edit_message_text(
+                        chat_id=lot["chat_id"],
+                        message_id=lot["board_message_id"],
+                        text=format_lottery(lot),
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"LOTTERY BOARD UPDATE ERROR: "
+                        f"{exc}"
+                    )
+
+                await update.message.reply_text(
+                    f"✅ Лото №{lot['number']}: "
+                    f"№{number} теперь записан за "
+                    f"{rename['name']}."
+                )
+
+                return
+
+            # ------------------------------------------------
+            # "мои номера на Иванович"
+            # ------------------------------------------------
+
+            matching_lots = []
+
+            for lot in active_lotteries:
+                for number in lot["numbers"]:
+                    meta = lot.get(
+                        "reservation_meta",
+                        {}
+                    ).get(
+                        str(number),
+                        {}
+                    )
+
+                    if (
+                        str(
+                            meta.get(
+                                "user_id",
+                                ""
+                            )
+                        ) == str(user_id)
+                        and meta.get(
+                            "self",
+                            False,
+                        )
+                    ):
+                        matching_lots.append(
+                            lot
+                        )
+                        break
+
+            if not matching_lots:
+                await update.message.reply_text(
+                    "❌ У вас нет активных номерков, "
+                    "записанных на ваше имя."
+                )
+                return
+
+            if len(matching_lots) > 1:
+                numbers = ", ".join(
+                    f"№{lot['number']}"
+                    for lot in matching_lots
+                )
+
+                await update.message.reply_text(
+                    "⚠️ У вас есть номера "
+                    "в нескольких активных лото: "
+                    + numbers
+                    + ".\n"
+                    "Для изменения нескольких лото "
+                    "лучше укажите конкретный номер."
+                )
+                return
+
+            lot = matching_lots[0]
+
+            changed = []
+
+            for number in lot["numbers"]:
+                meta = lot.get(
+                    "reservation_meta",
+                    {}
+                ).get(
+                    str(number),
+                    {}
+                )
+
+                if (
+                    str(
+                        meta.get(
+                            "user_id",
+                            ""
+                        )
+                    ) == str(user_id)
+                    and meta.get(
+                        "self",
+                        False,
+                    )
+                ):
+                    lot["owners"][number] = (
+                        rename["name"]
+                    )
+
+                    changed.append(number)
+
+            save_lottery(
+                lot,
+                active=True,
+            )
+
+            try:
+                await update.get_bot().edit_message_text(
+                    chat_id=lot["chat_id"],
+                    message_id=lot["board_message_id"],
+                    text=format_lottery(lot),
+                )
+
+            except Exception as exc:
+                print(
+                    f"LOTTERY BOARD UPDATE ERROR: "
+                    f"{exc}"
+                )
+
+            await update.message.reply_text(
+                f"✅ Лото №{lot['number']}: "
+                f"ваши номера "
+                f"{', '.join(map(str, changed))} "
+                f"теперь записаны за "
+                f"{rename['name']}."
+            )
+
+            return
+
+        # ====================================================
+        # БРОНИРОВАНИЕ
+        # ====================================================
+
+        active_lotteries = read_lotteries()
+
+        active_numbers = [
+            lot["number"]
+            for lot in active_lotteries
+        ]
+
+        parsed = parse_reservation(
+            text,
+            active_lottery_numbers=active_numbers,
+        )
+
+        if not parsed:
+            # Не похожее на заявку сообщение —
+            # бот молчит.
+            return
+
+        lottery_number = parsed[
+            "lottery_number"
+        ]
+
+        assignments = parsed[
+            "assignments"
+        ]
+
+        # ----------------------------------------------------
+        # Определяем лото
+        # ----------------------------------------------------
+
+        if lottery_number is None:
+
+            if len(active_lotteries) == 0:
+                return
+
+            if len(active_lotteries) > 1:
+                available = ", ".join(
+                    f"№{lot['number']}"
+                    for lot in active_lotteries
+                )
+
+                await update.message.reply_text(
+                    "⚠️ Сейчас активно два лото: "
+                    + available
+                    + ".\n"
+                    "Укажите номер лото, например:\n"
+                    "165 4,5"
+                )
+
+                return
+
+            lottery_number = (
+                active_lotteries[0]["number"]
+            )
+
+        # ----------------------------------------------------
+        # Ищем лото
+        # ----------------------------------------------------
 
         lot = find_lottery(
             lottery_number
@@ -935,45 +1662,132 @@ async def handle_lottery_reservation(update):
             )
             return
 
-        # Проверяем номера.
-        invalid = [
-            number
-            for number in requested_numbers
-            if number not in lot["numbers"]
-        ]
+        # ----------------------------------------------------
+        # Имя автора сообщения
+        # ----------------------------------------------------
 
-        if invalid:
-            await update.message.reply_text(
-                "❌ В этом лото нет номерков: "
-                + ", ".join(
-                    map(str, invalid)
+        telegram_name = get_user_display_name(
+            update.effective_user
+        )
+
+        user_id = (
+            update.effective_user.id
+            if update.effective_user
+            else None
+        )
+
+        if not user_id:
+            return
+
+        # ----------------------------------------------------
+        # Проверяем и записываем каждый номер
+        # отдельно.
+        #
+        # Это позволяет делать ЧАСТИЧНУЮ бронь.
+        # ----------------------------------------------------
+
+        booked = []
+        occupied = []
+        invalid = []
+
+        reservation_meta = lot.get(
+            "reservation_meta",
+            {}
+        )
+
+        for assignment in assignments:
+
+            number = assignment[
+                "number"
+            ]
+
+            requested_name = (
+                assignment["name"]
+                or telegram_name
+            )
+
+            if number not in lot["numbers"]:
+                invalid.append(number)
+                continue
+
+            if number in lot["owners"]:
+                occupied.append({
+                    "number": number,
+                    "owner": lot["owners"][number],
+                })
+                continue
+
+            lot["owners"][number] = (
+                requested_name
+            )
+
+            is_self = (
+                assignment["name"] is None
+                or
+                normalize(
+                    requested_name
+                )
+                ==
+                normalize(
+                    telegram_name
                 )
             )
+
+            reservation_meta[
+                str(number)
+            ] = {
+                "user_id": user_id,
+                "self": is_self,
+            }
+
+            booked.append({
+                "number": number,
+                "name": requested_name,
+            })
+
+        lot["reservation_meta"] = (
+            reservation_meta
+        )
+
+        # ----------------------------------------------------
+        # Если ничего не записали — состояние
+        # сохранять не нужно.
+        # ----------------------------------------------------
+
+        if not booked:
+
+            parts = []
+
+            if occupied:
+                parts.append(
+                    "❌ Уже заняты:\n"
+                    +
+                    "\n".join(
+                        f"№{item['number']} — "
+                        f"{item['owner']}"
+                        for item in occupied
+                    )
+                )
+
+            if invalid:
+                parts.append(
+                    "❌ В этом лото нет номерков: "
+                    +
+                    ", ".join(
+                        map(str, invalid)
+                    )
+                )
+
+            if parts:
+                await update.message.reply_text(
+                    "\n\n".join(parts)
+                )
+
             return
 
-        occupied = [
-            number
-            for number in requested_numbers
-            if number in lot["owners"]
-        ]
-
-        if occupied:
-            details = ", ".join(
-                f"№{number} — "
-                f"{lot['owners'][number]}"
-                for number in occupied
-            )
-
-            await update.message.reply_text(
-                "❌ Эти номерки уже заняты:\n"
-                + details
-            )
-
-            return
-
-        # Все номера свободны.
-        for number in requested_numbers:
-            lot["owners"][number] = name
+        # ----------------------------------------------------
+        # Проверяем, закрылось ли лото.
+        # ----------------------------------------------------
 
         free_count = sum(
             1
@@ -981,18 +1795,20 @@ async def handle_lottery_reservation(update):
             if number not in lot["owners"]
         )
 
-        # Если все заняты — лото закрываем.
         is_closed = (
             free_count == 0
         )
 
-        # Сначала сохраняем состояние.
+        # Сохраняем состояние.
         save_lottery(
             lot,
             active=not is_closed,
         )
 
+        # ----------------------------------------------------
         # Обновляем табло.
+        # ----------------------------------------------------
+
         try:
             await update.get_bot().edit_message_text(
                 chat_id=lot["chat_id"],
@@ -1006,23 +1822,62 @@ async def handle_lottery_reservation(update):
                 f"{exc}"
             )
 
+        # ----------------------------------------------------
+        # Формируем ответ.
+        # ----------------------------------------------------
+
+        response = [
+            f"✅ Лото №{lottery_number}"
+        ]
+
+        response.append(
+            "Записано:"
+        )
+
+        response.append(
+            "\n".join(
+                f"№{item['number']} — "
+                f"{item['name']}"
+                for item in booked
+            )
+        )
+
+        if occupied:
+            response.append(
+                "❌ Уже заняты:"
+            )
+
+            response.append(
+                "\n".join(
+                    f"№{item['number']} — "
+                    f"{item['owner']}"
+                    for item in occupied
+                )
+            )
+
+        if invalid:
+            response.append(
+                "❌ Нет в этом лото: "
+                +
+                ", ".join(
+                    map(str, invalid)
+                )
+            )
+
         if is_closed:
-            await update.message.reply_text(
-                f"🔴 Лото №{lottery_number} "
-                "закрыто.\n"
-                f"Номерки "
-                f"{', '.join(map(str, requested_numbers))} "
-                f"записаны за {name}.\n"
-                "Все номерки заняты."
+            response.append(
+                "🔴 ЛОТО ЗАКРЫТО — "
+                "все номерки заняты."
             )
 
         else:
-            await update.message.reply_text(
-                f"✅ Лото №{lottery_number}: "
-                f"номерки "
-                f"{', '.join(map(str, requested_numbers))} "
-                f"записаны за {name}."
+            response.append(
+                f"🟢 Свободно: {free_count}"
             )
+
+        await update.message.reply_text(
+            "\n\n".join(response)
+        )
 
 
 # ============================================================
@@ -1035,21 +1890,19 @@ async def start(
 ):
     if not is_allowed_user(update):
         await update.message.reply_text(
-            "🔒 У вас нет доступа к этому боту."
+    "Привет! 👋\n\n"
+    "Остатки: «остатки» "
+    "или «остатки лейка».\n\n"
+    "Лото можно бронировать обычным сообщением:\n"
+    "5\n"
+    "5,6,8\n"
+    "Иванов 5,6\n"
+    "5 Аня, 6 Влад, 8 Петя\n\n"
+    "Если активно два лото, укажите номер:\n"
+    "165 5,6\n\n"
+    "Можно изменить имя:\n"
+    "5 на Иванович"
         )
-        return
-
-    await update.message.reply_text(
-        "Привет! 👋\n\n"
-        "Остатки: «остатки» "
-        "или «остатки лейка».\n\n"
-        "Для лото участник должен писать строго:\n"
-        "лот 165\n"
-        "номер 4,5,6\n"
-        "имя Влад\n\n"
-        "Также можно писать номерки через пробел:\n"
-        "номер 4 5 6"
-    )
 
 
 async def my_id(
