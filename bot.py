@@ -686,7 +686,7 @@ def parse_reservation(
     # ========================================================
 
     if re.fullmatch(
-        r"\d+(?:[\s,]+\d+)*",
+        r"\d+(?:[\s,\/]+\d+)*",
         text,
     ):
         numbers = [
@@ -785,7 +785,7 @@ def parse_reservation(
     # --------------------------------------------------------
 
     single_name_match = re.fullmatch(
-        r"((?:\d+\s*[, ]\s*)*\d+)"
+        r"((?:\d+\s*[,/ ]\s*)*\d+)"
         r"\s+(.+)",
         text,
         flags=re.IGNORECASE,
@@ -849,7 +849,7 @@ def parse_reservation(
             # ----------------------------------------------
 
             match = re.fullmatch(
-                r"((?:\d+\s*[, ]\s*)*\d+)"
+                r"((?:\d+\s*[,/ ]\s*)*\d+)"
                 r"\s+(.+)",
                 part,
                 flags=re.IGNORECASE,
