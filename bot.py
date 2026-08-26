@@ -757,80 +757,152 @@ def parse_reservation(
     #
     # превращается в две группы.
 
-    parts = re.split(
-        r",\s*(?=\d+\s)",
-        text,
-    )
-
-    parts = [
-        part.strip()
-        for part in parts
-        if part.strip()
-    ]
+    # ========================================================
+    # Разбираем номера + имя.
+    #
+    # Поддерживаем:
+    #
+    # 1 3 Влад
+    # 1,3 Влад
+    # 1 2 3 Влад
+    # 1, 2, 3 Влад
+    #
+    # А также разные имена:
+    #
+    # 1 Аня, 2 Влад, 3 Петя
+    # ========================================================
 
     assignments = []
 
-    for part in parts:
+    # --------------------------------------------------------
+    # Сначала пробуем разобрать вариант,
+    # где одна заявка содержит несколько номеров
+    # и одно имя:
+    #
+    # 1 3 Влад
+    # 1,3 Влад
+    # 1 2 3 Влад
+    # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # Несколько номеров + одно имя:
-        #
-        # 1,2 Влад
-        # 5,6,7 Аня
-        # ----------------------------------------------------
+    single_name_match = re.fullmatch(
+        r"((?:\d+\s*[, ]\s*)*\d+)"
+        r"\s+(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
 
-        match = re.fullmatch(
-            r"((?:\d+\s*,\s*)*\d+)"
-            r"\s+(.+)",
-            part,
-            flags=re.IGNORECASE,
+    if single_name_match:
+
+        numbers_text = (
+            single_name_match.group(1)
         )
 
-        if match:
+        name = (
+            single_name_match.group(2)
+            .strip()
+        )
 
-            numbers_text = match.group(1)
-            name = match.group(2).strip()
+        numbers = [
+            int(value)
+            for value in re.findall(
+                r"\d+",
+                numbers_text,
+            )
+        ]
 
-            if not name:
-                return None
+        if not numbers or not name:
+            return None
 
-            numbers = [
-                int(value)
-                for value in re.findall(
-                    r"\d+",
-                    numbers_text,
-                )
-            ]
-
-            # Одно указанное имя применяется
-            # ко ВСЕМ номерам этой группы.
-            for number in numbers:
-                assignments.append({
-                    "number": number,
-                    "name": name,
-                })
-
-            continue
-
-        # ----------------------------------------------------
-        # Просто номер:
-        #
-        # 5
-        # ----------------------------------------------------
-
-        if re.fullmatch(
-            r"\d+",
-            part,
-        ):
+        for number in numbers:
             assignments.append({
-                "number": int(part),
-                "name": None,
+                "number": number,
+                "name": name,
             })
 
-            continue
+    else:
 
-        # Непонятный формат — бот молчит.
-        return None
+        # ----------------------------------------------------
+        # Если всё сообщение не является одной группой,
+        # разбираем отдельные заявки:
+        #
+        # 1 Аня, 2 Влад, 3 Петя
+        # ----------------------------------------------------
+
+        parts = re.split(
+            r",\s*(?=\d+\s)",
+            text,
+        )
+
+        parts = [
+            part.strip()
+            for part in parts
+            if part.strip()
+        ]
+
+        for part in parts:
+
+            # ----------------------------------------------
+            # Несколько номеров + имя:
+            #
+            # 1 2 Влад
+            # 1,2 Влад
+            # ----------------------------------------------
+
+            match = re.fullmatch(
+                r"((?:\d+\s*[, ]\s*)*\d+)"
+                r"\s+(.+)",
+                part,
+                flags=re.IGNORECASE,
+            )
+
+            if match:
+
+                numbers_text = (
+                    match.group(1)
+                )
+
+                name = (
+                    match.group(2)
+                    .strip()
+                )
+
+                numbers = [
+                    int(value)
+                    for value in re.findall(
+                        r"\d+",
+                        numbers_text,
+                    )
+                ]
+
+                if not numbers or not name:
+                    return None
+
+                for number in numbers:
+                    assignments.append({
+                        "number": number,
+                        "name": name,
+                    })
+
+                continue
+
+            # ----------------------------------------------
+            # Просто номер:
+            #
+            # 5
+            # ----------------------------------------------
+
+            if re.fullmatch(
+                r"\d+",
+                part,
+            ):
+                assignments.append({
+                    "number": int(part),
+                    "name": None,
+                })
+
+                continue
+
+            return None
 
     if not assignments:
         return None
