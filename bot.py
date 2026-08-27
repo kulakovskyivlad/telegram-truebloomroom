@@ -813,6 +813,8 @@ def parse_reservation(
                 name = (
                     match.group("name")
                     .strip()
+                    .strip(",./")
+                    .strip()
                 )
 
                 if not name:
@@ -872,6 +874,8 @@ def parse_reservation(
 
                 name = (
                     match.group(2)
+                    .strip()
+                    .strip(",./")
                     .strip()
                 )
 
