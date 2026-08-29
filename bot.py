@@ -597,27 +597,54 @@ def parse_reservation(
 
     Поддерживает:
 
-    1
-    1 3
-    1,2
-    3/4/9
+    ТОЛЬКО НОМЕРА:
+        5
+        5 7 10
+        5,7,10
+        5/7/10
 
-    1 Влад
-    1 3 Влад
-    1,2 Влад
-    3/4/9 Влад
+    ОДИН ЧЕЛОВЕК:
+        5 Влад
+        5 7 10 Влад
+        5,7,10 Влад
+        5/7/10 Влад
 
-    1 Влад 3 Полина
-    1 Аня, 2 Влад, 3 Петя
+        Влад 5
+        Влад 5 7 10
+        Влад 5,7,10
+        Влад 5/7/10
 
-    лот 165
-    1,2,3
+    НЕСКОЛЬКО ЛЮДЕЙ:
+        1 Влад 2 Полина 3 Настя
+        1,2 Влад 3 Полина
+        1/2 Влад 3/4 Полина
 
-    лот 165
-    1 Влад 3 Полина
+        Влад 1 Полина 2 Настя 3
+        Влад 1,2 Полина 3,4 Настя 5
+        Влад 1/2 Полина 3/4 Настя 5
 
-    Если имя не указано — используется имя
-    Telegram-пользователя в handle_lottery_reservation().
+    Номер лото:
+        165 1 2 3
+        165 Влад 1 2 3
+
+    Возвращает:
+
+        {
+            "lottery_number": ...,
+            "assignments": [
+                {
+                    "number": 1,
+                    "name": "Влад"
+                },
+                ...
+            ]
+        }
+
+    Если имя не указано:
+        "name": None
+
+    Тогда handle_lottery_reservation()
+    использует имя Telegram-пользователя.
     """
 
     text = str(text or "").strip()
@@ -635,10 +662,98 @@ def parse_reservation(
     lottery_number = None
 
     # ========================================================
-    # НОМЕР ЛОТО
+    # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+    # ========================================================
+
+    def clean_name(name):
+        """
+        Убирает лишние разделители
+        вокруг имени.
+
+        Например:
+
+        Полина,  -> Полина
+        /Влад/   -> Влад
+        Настя.   -> Настя
+        """
+
+        return (
+            str(name or "")
+            .strip()
+            .strip(",./")
+            .strip()
+        )
+
+    def make_assignments(numbers, name=None):
+        """
+        Превращает:
+
+        [1, 2, 3] + Влад
+
+        в:
+
+        1 -> Влад
+        2 -> Влад
+        3 -> Влад
+        """
+
+        cleaned_name = (
+            clean_name(name)
+            if name is not None
+            else None
+        )
+
+        return [
+            {
+                "number": int(number),
+                "name": cleaned_name,
+            }
+            for number in numbers
+        ]
+
+    def extract_numbers(value):
+        """
+        Извлекает номера из строки.
+
+        1 2 3
+        1,2,3
+        1/2/3
+
+        -> [1, 2, 3]
+        """
+
+        return [
+            int(number)
+            for number in re.findall(
+                r"\d+",
+                str(value or ""),
+            )
+        ]
+
+    def valid_numbers(numbers):
+        """
+        Номера должны существовать
+        и не повторяться.
+        """
+
+        return (
+            bool(numbers)
+            and len(numbers)
+            == len(set(numbers))
+        )
+
+    def looks_like_lottery_number(number):
+        return (
+            number in active_lottery_numbers
+        )
+
+    # ========================================================
+    # УБИРАЕМ "ЛОТ 165"
+    #
+    # Например:
     #
     # лот 165
-    # лот №165
+    # 1 2 3 Влад
     # ========================================================
 
     lottery_match = re.search(
@@ -648,6 +763,7 @@ def parse_reservation(
     )
 
     if lottery_match:
+
         lottery_number = int(
             lottery_match.group(1)
         )
@@ -659,13 +775,14 @@ def parse_reservation(
         ).strip()
 
     # ========================================================
-    # УБИРАЕМ "номер"
+    # УБИРАЕМ "НОМЕР" / "НОМЕРКИ"
     #
-    # номер 1,2,3
+    # номер 1 2 3
+    # номерки 1/2/3
     # ========================================================
 
     text = re.sub(
-        r"^\s*номер\s+",
+        r"^\s*номер(?:ки)?\s*",
         "",
         text,
         flags=re.IGNORECASE,
@@ -675,290 +792,454 @@ def parse_reservation(
         return None
 
     # ========================================================
-    # ЧИСТЫЕ НОМЕРА
+    # ПОДГОТОВКА
     #
-    # 1
+    # Запятые и "/" превращаем в пробел.
+    #
+    # 1,2/3
+    #
+    # становится:
+    #
+    # 1 2 3
+    #
+    # При этом имена вроде:
+    #
+    # Полина,
+    #
+    # потом очищаются через clean_name().
+    # ========================================================
+
+    normalized_text = re.sub(
+        r"[,/]+",
+        " ",
+        text,
+    )
+
+    tokens = [
+        token.strip()
+        for token in normalized_text.split()
+        if token.strip()
+    ]
+
+    if not tokens:
+        return None
+
+    # ========================================================
+    # ВАРИАНТ 1
+    #
+    # ТОЛЬКО НОМЕРА
+    #
     # 1 2 3
     # 1,2,3
     # 1/2/3
     # ========================================================
 
-    if re.fullmatch(
-        r"\d+(?:[\s,\/]+\d+)*",
-        text,
+    if all(
+        token.isdigit()
+        for token in tokens
     ):
+
         numbers = [
-            int(value)
-            for value in re.findall(
-                r"\d+",
-                text,
-            )
+            int(token)
+            for token in tokens
         ]
 
         # ----------------------------------------------------
-        # Если активно два лото и написано:
+        # Если активны два лото:
         #
         # 165 1 2 3
         #
-        # считаем 165 номером лото.
+        # первое число может быть номером лото.
         # ----------------------------------------------------
 
         if (
             lottery_number is None
             and len(active_lottery_numbers) > 1
             and len(numbers) > 1
-            and numbers[0]
-            in active_lottery_numbers
+            and looks_like_lottery_number(
+                numbers[0]
+            )
         ):
             lottery_number = numbers[0]
             numbers = numbers[1:]
 
-        if not numbers:
-            return None
-
-        if len(numbers) != len(set(numbers)):
+        if not valid_numbers(numbers):
             return None
 
         return {
             "lottery_number": lottery_number,
-            "assignments": [
-                {
-                    "number": number,
-                    "name": None,
-                }
-                for number in numbers
-            ],
+            "assignments": make_assignments(
+                numbers,
+                None,
+            ),
         }
 
     # ========================================================
-    # ИМЕНА И НОМЕРА
+    # ВАРИАНТ 2
     #
-    # Важный момент:
+    # НЕСКОЛЬКО ЛЮДЕЙ:
     #
-    # 1 Влад 3 Полина
+    # НОМЕР -> ИМЯ
     #
-    # должно стать:
+    # 1 Влад 2 Полина 3 Настя
     #
-    # №1 — Влад
-    # №3 — Полина
+    # 1 2 Влад 3 Полина
     #
-    # А:
-    #
-    # 1 2 Влад
-    #
-    # должно стать:
-    #
-    # №1 — Влад
-    # №2 — Влад
     # ========================================================
 
     assignments = []
 
+    i = 0
+
+    while i < len(tokens):
+
+        # ----------------------------------------------------
+        # Должен начинаться номер.
+        # ----------------------------------------------------
+
+        if not tokens[i].isdigit():
+            assignments = []
+            break
+
+        number = int(
+            tokens[i]
+        )
+
+        i += 1
+
+        # ----------------------------------------------------
+        # После номера собираем имя
+        # до следующего номера.
+        # ----------------------------------------------------
+
+        name_parts = []
+
+        while (
+            i < len(tokens)
+            and not tokens[i].isdigit()
+        ):
+            name_parts.append(
+                tokens[i]
+            )
+            i += 1
+
+        if not name_parts:
+            assignments = []
+            break
+
+        name = clean_name(
+            " ".join(name_parts)
+        )
+
+        if not name:
+            assignments = []
+            break
+
+        assignments.append({
+            "number": number,
+            "name": name,
+        })
+
     # --------------------------------------------------------
-    # Сначала пробуем найти последовательность:
+    # Если получили несколько отдельных
+    # номер -> имя, возвращаем их.
     #
-    # 1 Влад 3 Полина
-    # 5 Аня 6 Влад 8 Петя
+    # ВАЖНО:
     #
-    # Номер/имя определяется по следующему номеру.
+    # 1 Влад 2 Полина 3 Настя
+    #
+    # будет:
+    #
+    # 1 Влад
+    # 2 Полина
+    # 3 Настя
     # --------------------------------------------------------
 
-    pattern = re.compile(
-        r"(?P<numbers>\d+(?:\s*[,\/]\s*\d+)*)"
-        r"\s+"
-        r"(?P<name>.+?)"
-        r"(?=\s+\d+(?:\s*[,\/]\s*\d+)*\s+|$)",
+    if assignments:
+
+        numbers = [
+            item["number"]
+            for item in assignments
+        ]
+
+        if valid_numbers(numbers):
+
+            # ------------------------------------------------
+            # Возможный номер лото в начале:
+            #
+            # 165 1 Влад 2 Полина
+            #
+            # ------------------------------------------------
+
+            if (
+                lottery_number is None
+                and len(active_lottery_numbers) > 1
+                and len(assignments) > 1
+                and looks_like_lottery_number(
+                    assignments[0]["number"]
+                )
+            ):
+                lottery_number = (
+                    assignments[0]["number"]
+                )
+
+                assignments = (
+                    assignments[1:]
+                )
+
+            if assignments:
+
+                return {
+                    "lottery_number": lottery_number,
+                    "assignments": assignments,
+                }
+
+    # ========================================================
+    # ВАРИАНТ 3
+    #
+    # ИМЯ -> НОМЕРА
+    #
+    # Влад 1 2 3
+    #
+    # Влад 1 Полина 2 Настя 3
+    #
+    # ========================================================
+
+    assignments = []
+
+    current_name_parts = []
+
+    i = 0
+
+    while i < len(tokens):
+
+        # ----------------------------------------------------
+        # Если встретили число:
+        #
+        # всё, что накопили до него — имя.
+        # ----------------------------------------------------
+
+        if tokens[i].isdigit():
+
+            if not current_name_parts:
+                assignments = []
+                break
+
+            name = clean_name(
+                " ".join(
+                    current_name_parts
+                )
+            )
+
+            if not name:
+                assignments = []
+                break
+
+            # ------------------------------------------------
+            # Это первый номер после имени.
+            # ------------------------------------------------
+
+            number = int(
+                tokens[i]
+            )
+
+            assignments.append({
+                "number": number,
+                "name": name,
+            })
+
+            i += 1
+
+            # ------------------------------------------------
+            # После номера могут сразу идти
+            # дополнительные номера того же человека.
+            #
+            # Влад 1 2 3 Полина 4
+            #
+            # ------------------------------------------------
+
+            while (
+                i < len(tokens)
+                and tokens[i].isdigit()
+            ):
+                assignments.append({
+                    "number": int(
+                        tokens[i]
+                    ),
+                    "name": name,
+                })
+
+                i += 1
+
+            # ------------------------------------------------
+            # Начинается новая группа имени.
+            # ------------------------------------------------
+
+            current_name_parts = []
+
+        else:
+
+            current_name_parts.append(
+                tokens[i]
+            )
+
+            i += 1
+
+    if assignments:
+
+        numbers = [
+            item["number"]
+            for item in assignments
+        ]
+
+        if valid_numbers(numbers):
+
+            # ------------------------------------------------
+            # Возможный номер лото:
+            #
+            # Влад 165 1 2
+            #
+            # Но только если активны два лото.
+            # ------------------------------------------------
+
+            if (
+                lottery_number is None
+                and len(active_lottery_numbers) > 1
+                and assignments[0]["number"]
+                in active_lottery_numbers
+            ):
+                lottery_number = (
+                    assignments[0]["number"]
+                )
+
+                assignments = (
+                    assignments[1:]
+                )
+
+            if assignments:
+
+                return {
+                    "lottery_number": lottery_number,
+                    "assignments": assignments,
+                }
+
+    # ========================================================
+    # ВАРИАНТ 4
+    #
+    # ОДИН ЧЕЛОВЕК:
+    #
+    # 1 2 3 Влад
+    #
+    # Этот вариант не прошёл выше,
+    # потому что начинается с цифр,
+    # но там нет номера перед каждым именем.
+    # ========================================================
+
+    # --------------------------------------------------------
+    # Ищем последовательность:
+    #
+    # НОМЕРА + ИМЯ
+    #
+    # --------------------------------------------------------
+
+    match = re.fullmatch(
+        r"(\d+(?:\s+\d+)*)\s+(.+)",
+        normalized_text,
         flags=re.IGNORECASE,
     )
 
-    matches = list(
-        pattern.finditer(text)
-    )
+    if match:
 
-    if matches:
-
-        # Проверяем, что найденные куски
-        # покрывают весь текст без мусора.
-        reconstructed = "".join(
-            match.group(0)
-            for match in matches
+        numbers = extract_numbers(
+            match.group(1)
         )
 
-        cleaned_original = re.sub(
-            r"[\s,\/]+",
-            "",
-            text,
+        name = clean_name(
+            match.group(2)
         )
-
-        cleaned_reconstructed = re.sub(
-            r"[\s,\/]+",
-            "",
-            reconstructed,
-        )
-
-        # Если структура действительно похожа
-        # на несколько заявок — используем её.
-        if cleaned_original == cleaned_reconstructed:
-
-            for match in matches:
-
-                numbers = [
-                    int(value)
-                    for value in re.findall(
-                        r"\d+",
-                        match.group("numbers"),
-                    )
-                ]
-
-                name = (
-                    match.group("name")
-                    .strip()
-                    .strip(",./")
-                    .strip()
-                )
-
-                if not name:
-                    return None
-
-                for number in numbers:
-                    assignments.append({
-                        "number": number,
-                        "name": name,
-                    })
-
-    # ========================================================
-    # ЕСЛИ НЕ ПОЛУЧИЛОСЬ РАЗОБРАТЬ КАК
-    #
-    # 1 Влад 3 Полина
-    #
-    # пробуем варианты с запятыми:
-    #
-    # 1 Аня, 2 Влад, 3 Петя
-    # ========================================================
-
-    if not assignments:
-
-        parts = re.split(
-            r",\s*(?=\d+\s)",
-            text,
-        )
-
-        parts = [
-            part.strip()
-            for part in parts
-            if part.strip()
-        ]
-
-        for part in parts:
-
-            # ------------------------------------------------
-            # Несколько номеров + одно имя:
-            #
-            # 1 2 Влад
-            # 1,2 Влад
-            # 1/2 Влад
-            # ------------------------------------------------
-
-            match = re.fullmatch(
-                r"((?:\d+\s*[,\/]\s*)*\d+)"
-                r"(?:\s+)(.+)",
-                part,
-                flags=re.IGNORECASE,
-            )
-
-            if match:
-
-                numbers_text = (
-                    match.group(1)
-                )
-
-                name = (
-                    match.group(2)
-                    .strip()
-                    .strip(",./")
-                    .strip()
-                )
-
-                if not name:
-                    return None
-
-                numbers = [
-                    int(value)
-                    for value in re.findall(
-                        r"\d+",
-                        numbers_text,
-                    )
-                ]
-
-                for number in numbers:
-                    assignments.append({
-                        "number": number,
-                        "name": name,
-                    })
-
-                continue
-
-            # ------------------------------------------------
-            # Просто номер:
-            # ------------------------------------------------
-
-            if re.fullmatch(
-                r"\d+",
-                part,
-            ):
-                assignments.append({
-                    "number": int(part),
-                    "name": None,
-                })
-
-                continue
-
-            return None
-
-    if not assignments:
-        return None
-
-    # ========================================================
-    # ДВА АКТИВНЫХ ЛОТО
-    #
-    # 165 1 Влад
-    #
-    # Первое число — номер лото.
-    # ========================================================
-
-    if (
-        lottery_number is None
-        and len(active_lottery_numbers) > 1
-    ):
-
-        # Если первая группа выглядит как номер
-        # активного лото, отделяем её.
-        first_number = assignments[0]["number"]
 
         if (
-            first_number
-            in active_lottery_numbers
-            and len(assignments) > 1
+            name
+            and valid_numbers(numbers)
         ):
-            lottery_number = first_number
-            assignments = assignments[1:]
+
+            if (
+                lottery_number is None
+                and len(active_lottery_numbers) > 1
+                and len(numbers) > 1
+                and looks_like_lottery_number(
+                    numbers[0]
+                )
+            ):
+                lottery_number = numbers[0]
+                numbers = numbers[1:]
+
+            if valid_numbers(numbers):
+
+                return {
+                    "lottery_number": lottery_number,
+                    "assignments": make_assignments(
+                        numbers,
+                        name,
+                    ),
+                }
 
     # ========================================================
-    # ПРОВЕРКА НА ПОВТОРЫ
+    # ВАРИАНТ 5
+    #
+    # ОДИН ЧЕЛОВЕК:
+    #
+    # Влад 1,2,3
+    #
     # ========================================================
 
-    numbers = [
-        item["number"]
-        for item in assignments
-    ]
+    match = re.fullmatch(
+        r"(.+?)\s+(\d+(?:\s+\d+)*)",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
 
-    if len(numbers) != len(set(numbers)):
-        return None
+    if match:
 
-    return {
-        "lottery_number": lottery_number,
-        "assignments": assignments,
-    }	
+        name = clean_name(
+            match.group(1)
+        )
+
+        numbers = extract_numbers(
+            match.group(2)
+        )
+
+        if (
+            name
+            and valid_numbers(numbers)
+        ):
+
+            if (
+                lottery_number is None
+                and len(active_lottery_numbers) > 1
+                and len(numbers) > 1
+                and looks_like_lottery_number(
+                    numbers[0]
+                )
+            ):
+                lottery_number = numbers[0]
+                numbers = numbers[1:]
+
+            if valid_numbers(numbers):
+
+                return {
+                    "lottery_number": lottery_number,
+                    "assignments": make_assignments(
+                        numbers,
+                        name,
+                    ),
+                }
+
+    # ========================================================
+    # НИЧЕГО НЕ РАСПОЗНАЛИ
+    # ========================================================
+
+    return None	
 # ============================================================
 # ЛОТО — СОХРАНЕНИЕ В GOOGLE SHEETS
 # ============================================================
