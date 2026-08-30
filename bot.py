@@ -1256,19 +1256,15 @@ def read_lotteries():
     """
     Загружает все активные лото из Google Таблицы.
 
-    Сохраняется после перезапуска Render.
+    Восстанавливает:
+    - номера лото;
+    - имена владельцев;
+    - Telegram user_id;
+    - признак self для каждого номера.
 
-    reservation_meta:
-    {
-        "5": {
-            "user_id": 123456,
-            "self": true
-        },
-        "6": {
-            "user_id": 123456,
-            "self": false
-        }
-    }
+    Благодаря этому бот после перезапуска
+    понимает, какие номера принадлежат
+    конкретному пользователю.
     """
 
     worksheet = ensure_lottery_sheet()
@@ -1291,10 +1287,16 @@ def read_lotteries():
     result = []
 
     for row in values[1:]:
+
         if not row:
             continue
 
         try:
+
+            # =================================================
+            # ПРОВЕРЯЕМ, АКТИВНО ЛИ ЛОТО
+            # =================================================
+
             active_index = index["active"]
 
             active_value = (
@@ -1313,6 +1315,10 @@ def read_lotteries():
             if not active:
                 continue
 
+            # =================================================
+            # ЗАГРУЖАЕМ НОМЕРА И ИМЕНА
+            # =================================================
+
             slots_json = row[
                 index["slots_json"]
             ]
@@ -1329,50 +1335,87 @@ def read_lotteries():
             owners = {}
 
             for number, owner in slots_data.items():
+
                 if owner:
                     owners[int(number)] = str(owner)
 
-            # Новая информация о покупателях.
-            # Для старых записей её может не быть.
+            # =================================================
+            # ЗАГРУЖАЕМ RESERVATION META
+            # =================================================
+
             reservation_meta = {}
 
             if "reservation_meta_json" in index:
+
                 meta_index = index[
                     "reservation_meta_json"
                 ]
 
-                if meta_index < len(row):
-                    raw_meta = row[meta_index].strip()
+                meta_text = (
+                    row[meta_index]
+                    if meta_index < len(row)
+                    else ""
+                )
 
-                    if raw_meta:
-                        try:
-                            reservation_meta = json.loads(
-                                raw_meta
-                            )
-                        except Exception:
-                            reservation_meta = {}
+                if meta_text:
+
+                    try:
+                        reservation_meta = json.loads(
+                            meta_text
+                        )
+
+                    except Exception as exc:
+                        print(
+                            "RESERVATION META "
+                            f"JSON ERROR: {exc}"
+                        )
+
+            # =================================================
+            # СОЗДАЁМ ОБЪЕКТ ЛОТО
+            # =================================================
 
             result.append({
+
                 "number": int(
-                    row[index["lot_number"]]
+                    row[
+                        index["lot_number"]
+                    ]
                 ),
+
                 "chat_id": int(
-                    row[index["chat_id"]]
+                    row[
+                        index["chat_id"]
+                    ]
                 ),
+
                 "source_message_id": int(
-                    row[index["source_message_id"]]
+                    row[
+                        index["source_message_id"]
+                    ]
                 ),
+
                 "board_message_id": int(
-                    row[index["board_message_id"]]
+                    row[
+                        index["board_message_id"]
+                    ]
                 ),
-                "numbers": sorted(numbers),
+
+                "numbers": sorted(
+                    numbers
+                ),
+
                 "owners": owners,
-                "reservation_meta": reservation_meta,
+
+                "reservation_meta": (
+                    reservation_meta
+                ),
             })
 
         except Exception as exc:
+
             print(
-                f"LOTTERY STATE ERROR: {exc}"
+                "LOTTERY STATE ERROR: "
+                f"{type(exc).__name__}: {exc}"
             )
 
     return result
