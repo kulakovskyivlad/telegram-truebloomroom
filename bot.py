@@ -474,7 +474,7 @@ def extract_lottery(text):
     for line in lines[1:]:
 
         match = re.fullmatch(
-            r"количество\s+номерков\s*:\s*(\d+)",
+            r"кількість\s+спроб\s*:\s*(\d+)",
             normalize(line),
             flags=re.IGNORECASE,
         )
