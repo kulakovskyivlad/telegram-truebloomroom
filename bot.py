@@ -423,60 +423,95 @@ def is_allowed_user(update):
 
 def extract_lottery(text):
     """
-    Ищем пост администратора, который начинается:
+    Создание нового лото.
+
+    Поддерживается только новый формат:
 
     Лото №165
 
-    Ниже ищем строки вида:
+    Количество номерков: 10
 
-    1 🌸 Лисюк
-    2 🌸 Лисюк
-    3 🌸 Кузьменко
-
-    и т.д.
+    Бот создаёт номера от 1 до 10.
     """
 
     if not text:
         return None
 
-    lines = str(text).splitlines()
+    lines = [
+        line.strip()
+        for line in str(text).splitlines()
+        if line.strip()
+    ]
 
     if not lines:
         return None
 
-    first = lines[0].strip()
+    # ========================================================
+    # ПЕРВАЯ СТРОКА — НОМЕР ЛОТО
+    # ========================================================
 
-    match = re.match(
-        r"^лото\s*№\s*(\d+)\s*$",
-        normalize(first),
+    first_line = lines[0]
+
+    lottery_match = re.fullmatch(
+        r"лото\s*№\s*(\d+)",
+        normalize(first_line),
+        flags=re.IGNORECASE,
     )
 
-    if not match:
+    if not lottery_match:
         return None
 
-    lottery_number = int(match.group(1))
+    lottery_number = int(
+        lottery_match.group(1)
+    )
 
-    numbers = set()
+    # ========================================================
+    # ИЩЕМ КОЛИЧЕСТВО НОМЕРКОВ
+    # ========================================================
+
+    numbers_count = None
 
     for line in lines[1:]:
-        m = re.match(
-            r"^\s*(\d{1,3})"
-            r"(?:\s|$|[🌸🪷🌿\-—:.)])",
-            line,
+
+        match = re.fullmatch(
+            r"количество\s+номерков\s*:\s*(\d+)",
+            normalize(line),
+            flags=re.IGNORECASE,
         )
 
-        if m:
-            numbers.add(
-                int(m.group(1))
+        if match:
+            numbers_count = int(
+                match.group(1)
             )
+            break
 
-    # Нормальное лото должно содержать минимум 2 номерка.
-    if len(numbers) < 2:
+    # ========================================================
+    # ПРОВЕРЯЕМ КОЛИЧЕСТВО
+    # ========================================================
+
+    if numbers_count is None:
         return None
+
+    if numbers_count < 1:
+        return None
+
+    if numbers_count > 1000:
+        return None
+
+    # ========================================================
+    # СОЗДАЁМ НОМЕРКИ 1 ... N
+    # ========================================================
+
+    numbers = list(
+        range(
+            1,
+            numbers_count + 1,
+        )
+    )
 
     return (
         lottery_number,
-        sorted(numbers),
+        numbers,
     )
 
 
