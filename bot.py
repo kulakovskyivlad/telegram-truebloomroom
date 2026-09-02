@@ -1613,7 +1613,7 @@ async def create_lottery_from_admin_post(update):
         or update.message.caption
         or ""
     )
-
+    
     found = extract_lottery(text)
 
     if not found:
@@ -1814,27 +1814,24 @@ def parse_rename_command(text):
     return None
 
 async def handle_lottery_reservation(update):
-    if (
-        not update.message
-        or not lottery_chat_allowed(
-            update.effective_chat.id
-        )
-    ):
-        return
-
-    # Только групповые чаты.
-    if update.effective_chat.type not in (
-        "group",
-        "supergroup",
-    ):
+    if not update.message:
         return
 
     text = (
         update.message.text
+        or update.message.caption
         or ""
-    ).strip()
+    )
 
-    if not text:
+    # ========================================================
+    # НЕ ОБРАБАТЫВАЕМ СООБЩЕНИЕ, КОТОРОЕ СОЗДАЁТ НОВОЕ ЛОТО
+    #
+    # Это объявление администратора.
+    # Оно должно обрабатываться только
+    # create_lottery_from_admin_post().
+    # ========================================================
+
+    if extract_lottery(text):
         return
 
     async with LOTTERY_LOCK:
