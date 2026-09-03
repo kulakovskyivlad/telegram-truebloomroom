@@ -1912,42 +1912,262 @@ async def handle_lottery_reservation(update):
                 return
 
             # =================================================
+            # ПРОВЕРЯЕМ, ЯВЛЯЕТСЯ ЛИ АВТОР СООБЩЕНИЯ АДМИНОМ
+            # =================================================
+
+            is_admin = False
+
+            if update.effective_chat and update.effective_user:
+
+                try:
+                    member = await update.effective_chat.get_member(
+                        update.effective_user.id
+                    )
+
+                    is_admin = member.status in (
+                        "administrator",
+                        "creator",
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"ADMIN CHECK ERROR: {exc}"
+                    )
+
+            # =================================================
             # ОПРЕДЕЛЯЕМ НОМЕРА ДЛЯ ПЕРЕИМЕНОВАНИЯ
             # =================================================
 
-            rename_numbers = rename.get("numbers")
+            rename_numbers = rename.get(
+                "numbers"
+            )
 
-            # Для старого формата одного номера
-            # оставляем совместимость.
+            # Совместимость со старым форматом
+            # одного номера.
+
             if rename_numbers is None:
+
                 if rename.get("number") is not None:
+
                     rename_numbers = [
                         rename["number"]
                     ]
 
             # =================================================
-            # ЕСЛИ УКАЗАНЫ КОНКРЕТНЫЕ НОМЕРА
+            # КОНКРЕТНЫЕ НОМЕРА
             #
-            # Например:
-            #
-            # 2 на Антон
+            # 4 на Влад
             # 2 10 на Антон
             # 2,10 на Антон
             # 2/10 на Антон
-            #
-            # Сначала проверяем, принадлежат ли эти номера
-            # текущему пользователю.
             # =================================================
 
             if rename_numbers is not None:
 
-                # Убираем возможные дубликаты,
+                # Убираем дубликаты,
                 # сохраняя порядок.
+
                 rename_numbers = list(
                     dict.fromkeys(
                         rename_numbers
                     )
                 )
+
+                # =================================================
+                # АДМИН
+                #
+                # Администратор может менять чужие номерки.
+                #
+                # Но только уже занятые номерки.
+                # Свободный номер через "4 на Влад"
+                # не бронируем.
+                # =================================================
+
+                if is_admin:
+
+                    matching_lots = []
+
+                    for lot in active_lotteries:
+
+                        found_numbers = []
+
+                        for number in rename_numbers:
+
+                            if number not in lot["numbers"]:
+                                continue
+
+                            # Номер должен быть уже занят.
+                            if number not in lot["owners"]:
+                                continue
+
+                            found_numbers.append(
+                                number
+                            )
+
+                        if found_numbers:
+
+                            matching_lots.append(
+                                (
+                                    lot,
+                                    found_numbers,
+                                )
+                            )
+
+                    # ---------------------------------------------
+                    # Ни один номер не найден среди занятых
+                    # ---------------------------------------------
+
+                    if not matching_lots:
+
+                        await update.message.reply_text(
+                            "❌ Указанные номерки "
+                            "не найдены среди занятых."
+                        )
+
+                        return
+
+                    # ---------------------------------------------
+                    # Если номера находятся в разных лото
+                    # ---------------------------------------------
+
+                    unique_lots = []
+
+                    for lot, found_numbers in matching_lots:
+
+                        if lot not in unique_lots:
+                            unique_lots.append(
+                                lot
+                            )
+
+                    if len(unique_lots) > 1:
+
+                        numbers = ", ".join(
+                            f"№{lot['number']}"
+                            for lot in unique_lots
+                        )
+
+                        await update.message.reply_text(
+                            "⚠️ Указанные номерки "
+                            "находятся в нескольких "
+                            "активных лото: "
+                            + numbers
+                            + ".\n"
+                            "Укажите номер лото."
+                        )
+
+                        return
+
+                    # ---------------------------------------------
+                    # Одно лото
+                    # ---------------------------------------------
+
+                    lot = unique_lots[0]
+
+                    changed = []
+                    not_found = []
+
+                    for number in rename_numbers:
+
+                        # Номер отсутствует в этом лото.
+                        if number not in lot["numbers"]:
+                            not_found.append(
+                                number
+                            )
+                            continue
+
+                        # Номер свободен.
+                        if number not in lot["owners"]:
+                            not_found.append(
+                                number
+                            )
+                            continue
+
+                        # Меняем только имя.
+                        lot["owners"][number] = (
+                            rename["name"]
+                        )
+
+                        # ВАЖНО:
+                        # reservation_meta НЕ меняем.
+                        #
+                        # user_id остаётся прежним.
+                        # То есть сохраняется информация,
+                        # кто фактически забронировал номер.
+
+                        changed.append(
+                            number
+                        )
+
+                    if not changed:
+
+                        await update.message.reply_text(
+                            "❌ Не удалось изменить "
+                            "указанные номерки."
+                        )
+
+                        return
+
+                    # ---------------------------------------------
+                    # Сохраняем лото
+                    # ---------------------------------------------
+
+                    save_lottery(
+                        lot,
+                        active=True,
+                    )
+
+                    # ---------------------------------------------
+                    # Обновляем табло
+                    # ---------------------------------------------
+
+                    try:
+
+                        await update.get_bot().edit_message_text(
+                            chat_id=lot["chat_id"],
+                            message_id=lot["board_message_id"],
+                            text=format_lottery(lot),
+                        )
+
+                    except Exception as exc:
+
+                        print(
+                            f"LOTTERY BOARD UPDATE ERROR: "
+                            f"{exc}"
+                        )
+
+                    response = (
+                        f"✅ Лото №{lot['number']}: "
+                        f"администратор изменил "
+                        f"номера "
+                        f"{', '.join(map(str, changed))} "
+                        f"на "
+                        f"{rename['name']}."
+                    )
+
+                    if not_found:
+
+                        response += (
+                            "\n\n⚠️ Не изменены: "
+                            + ", ".join(
+                                map(
+                                    str,
+                                    not_found,
+                                )
+                            )
+                        )
+
+                    await update.message.reply_text(
+                        response
+                    )
+
+                    return
+
+                # =================================================
+                # ОБЫЧНЫЙ ПОЛЬЗОВАТЕЛЬ
+                #
+                # Здесь оставляем прежнее правило:
+                # менять можно только свои номера.
+                # =================================================
 
                 matching_lots = []
 
@@ -1977,11 +2197,13 @@ async def handle_lottery_reservation(update):
                             )
                             == str(user_id)
                         ):
+
                             owned_numbers.append(
                                 number
                             )
 
                     if owned_numbers:
+
                         matching_lots.append(
                             (
                                 lot,
@@ -1990,29 +2212,19 @@ async def handle_lottery_reservation(update):
                         )
 
                 # ---------------------------------------------
-                # Ни один из указанных номеров
+                # Ни один указанный номер
                 # не принадлежит пользователю.
                 #
-                # Например:
+                # Это может быть обычная заявка:
                 #
                 # 3 Антон
                 #
-                # если №3 свободен.
-                #
-                # Тогда это НЕ переименование.
-                # Передаём сообщение дальше
-                # в БРОНИРОВАНИЕ.
+                # Поэтому если "на" нет,
+                # передаём дальше в бронирование.
                 # ---------------------------------------------
 
                 if not matching_lots:
 
-                    # Только если это команда с "на",
-                    # но номер не принадлежит пользователю,
-                    # не возвращаемся.
-                    #
-                    # Это позволит обработать
-                    # "3 Антон" как обычную заявку,
-                    # если parse_reservation её поддерживает.
                     if " на " in (
                         f" {text.lower()} "
                     ):
@@ -2024,8 +2236,7 @@ async def handle_lottery_reservation(update):
                 else:
 
                     # -----------------------------------------
-                    # Если указанные номера находятся
-                    # в нескольких лото — просим уточнить.
+                    # Номера находятся в нескольких лото
                     # -----------------------------------------
 
                     unique_lots = []
@@ -2033,7 +2244,10 @@ async def handle_lottery_reservation(update):
                     for lot, owned_numbers in matching_lots:
 
                         if lot not in unique_lots:
-                            unique_lots.append(lot)
+
+                            unique_lots.append(
+                                lot
+                            )
 
                     if len(unique_lots) > 1:
 
@@ -2053,9 +2267,7 @@ async def handle_lottery_reservation(update):
                         return
 
                     # -----------------------------------------
-                    # Нашли одно лото.
-                    # Переименовываем ВСЕ указанные номера,
-                    # которые принадлежат пользователю.
+                    # Нашли одно лото
                     # -----------------------------------------
 
                     lot = unique_lots[0]
@@ -2084,12 +2296,13 @@ async def handle_lottery_reservation(update):
                             )
                             == str(user_id)
                         ):
+
                             owned_numbers.append(
                                 number
                             )
 
                     # -----------------------------------------
-                    # Переименовываем номера
+                    # Переименовываем
                     # -----------------------------------------
 
                     for number in owned_numbers:
@@ -2105,7 +2318,9 @@ async def handle_lottery_reservation(update):
 
                         if str(number) in meta:
 
-                            meta[str(number)]["self"] = (
+                            meta[
+                                str(number)
+                            ]["self"] = (
                                 normalize(
                                     rename["name"]
                                 )
@@ -2129,6 +2344,7 @@ async def handle_lottery_reservation(update):
                     # -----------------------------------------
 
                     try:
+
                         await update.get_bot().edit_message_text(
                             chat_id=lot["chat_id"],
                             message_id=lot["board_message_id"],
@@ -2136,6 +2352,7 @@ async def handle_lottery_reservation(update):
                         )
 
                     except Exception as exc:
+
                         print(
                             f"LOTTERY BOARD UPDATE ERROR: "
                             f"{exc}"
@@ -2153,8 +2370,6 @@ async def handle_lottery_reservation(update):
 
             # =================================================
             # ВСЕ СВОИ НОМЕРА
-            #
-            # Например:
             #
             # поменяйте на Антон
             # перезапишите меня на Антон
@@ -2186,9 +2401,11 @@ async def handle_lottery_reservation(update):
                             )
                             == str(user_id)
                         ):
+
                             matching_lots.append(
                                 lot
                             )
+
                             break
 
                 if not matching_lots:
@@ -2248,7 +2465,9 @@ async def handle_lottery_reservation(update):
 
                         if str(number) in meta:
 
-                            meta[str(number)]["self"] = (
+                            meta[
+                                str(number)
+                            ]["self"] = (
                                 normalize(
                                     rename["name"]
                                 )
@@ -2260,7 +2479,9 @@ async def handle_lottery_reservation(update):
                                 )
                             )
 
-                        changed.append(number)
+                        changed.append(
+                            number
+                        )
 
                 lot["reservation_meta"] = meta
 
@@ -2270,6 +2491,7 @@ async def handle_lottery_reservation(update):
                 )
 
                 try:
+
                     await update.get_bot().edit_message_text(
                         chat_id=lot["chat_id"],
                         message_id=lot["board_message_id"],
@@ -2277,6 +2499,7 @@ async def handle_lottery_reservation(update):
                     )
 
                 except Exception as exc:
+
                     print(
                         f"LOTTERY BOARD UPDATE ERROR: "
                         f"{exc}"
