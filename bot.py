@@ -46,6 +46,10 @@ SCOPES = [
 
 web = Flask(__name__)
 
+@web.route("/health")
+def health():
+    return "OK", 200
+
 # Защищаем одновременные изменения лото.
 LOTTERY_LOCK = asyncio.Lock()
 
