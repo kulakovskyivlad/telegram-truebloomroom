@@ -1711,27 +1711,26 @@ async def create_lottery_from_admin_post(update):
 
 def parse_rename_command(text):
     """
-    Команды изменения имени:
+    Понимает переименование:
 
-    ВСЕ СВОИ НОМЕРА:
+    2 на Антон
+    №2 на Антон
+
+    2 10 на Антон
+    2,10 на Антон
+    2/10 на Антон
+    №2 №10 на Антон
+
+    поменяйте 2 на Антон
+    поменяйте 2 10 на Антон
 
     поменяйте на Антон
     перезапишите на Антон
-    перезапишите меня на Антон
-    поменяйте меня на Антон
     мои номера на Антон
 
-    ОДИН НОМЕР:
-
-    поменяйте 9 на Антон
-    перезапишите 9 на Антон
-    9 на Антон
-    №9 на Антон
-
-    Также:
-
-    9 Антон
-    №9 Антон
+    Важно:
+    2 10
+    НЕ является переименованием.
     """
 
     text = str(text or "").strip()
@@ -1739,28 +1738,85 @@ def parse_rename_command(text):
     if not text:
         return None
 
-    # ========================================================
-    # ОДИН НОМЕР
+    # --------------------------------------------------------
+    # НОРМАЛИЗУЕМ ПРОБЕЛЫ
+    # --------------------------------------------------------
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
+    # --------------------------------------------------------
+    # ПЕРЕИМЕНОВАНИЕ КОНКРЕТНЫХ НОМЕРОВ
     #
-    # поменяйте 9 на Антон
-    # перезапишите 9 на Антон
-    # 9 на Антон
-    # №9 на Антон
-    # ========================================================
+    # 2 на Антон
+    # 2 10 на Антон
+    # 2,10 на Антон
+    # 2/10 на Антон
+    # №2 №10 на Антон
+    #
+    # Также:
+    #
+    # поменяйте 2 10 на Антон
+    # перезапишите 2 на Антон
+    # --------------------------------------------------------
 
     match = re.fullmatch(
         r"(?:(?:поменяйте|перезапишите)\s+)?"
-        r"(?:№\s*)?"
-        r"(\d{1,3})"
-        r"(?:\s+на)?"
-        r"\s+(.+)",
+        r"((?:№\s*)?\d{1,3}"
+        r"(?:\s*[,/]\s*|\s+)"
+        r"(?:№\s*)?\d{1,3})+"
+        r"\s+на\s+(.+)",
         text,
         flags=re.IGNORECASE,
     )
 
     if match:
+        numbers_text = match.group(1)
+        name = clean_name(
+            match.group(2)
+        )
 
+        numbers = [
+            int(number)
+            for number in re.findall(
+                r"\d{1,3}",
+                numbers_text,
+            )
+        ]
+
+        if numbers and name:
+            return {
+                "numbers": numbers,
+                "number": None,
+                "name": name,
+            }
+
+    # --------------------------------------------------------
+    # ОДИН КОНКРЕТНЫЙ НОМЕР
+    #
+    # 2 на Антон
+    # №2 на Антон
+    #
+    # поменяйте 2 на Антон
+    # перезапишите 2 на Антон
+    # --------------------------------------------------------
+
+    match = re.fullmatch(
+        r"(?:(?:поменяйте|перезапишите)\s+)?"
+        r"(?:№\s*)?(\d{1,3})"
+        r"\s+на\s+(.+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
         return {
+            "numbers": [
+                int(match.group(1))
+            ],
             "number": int(
                 match.group(1)
             ),
@@ -1769,7 +1825,7 @@ def parse_rename_command(text):
             ),
         }
 
-    # ========================================================
+    # --------------------------------------------------------
     # ВСЕ СВОИ НОМЕРА
     #
     # поменяйте на Антон
@@ -1777,7 +1833,7 @@ def parse_rename_command(text):
     # поменяйте меня на Антон
     # перезапишите меня на Антон
     # мои номера на Антон
-    # ========================================================
+    # --------------------------------------------------------
 
     match = re.fullmatch(
         r"(?:поменяйте|перезапишите)"
@@ -1788,8 +1844,8 @@ def parse_rename_command(text):
     )
 
     if match:
-
         return {
+            "numbers": None,
             "number": None,
             "name": clean_name(
                 match.group(1)
@@ -1803,8 +1859,8 @@ def parse_rename_command(text):
     )
 
     if match:
-
         return {
+            "numbers": None,
             "number": None,
             "name": clean_name(
                 match.group(1)
@@ -1856,55 +1912,139 @@ async def handle_lottery_reservation(update):
                 return
 
             # =================================================
-            # ВАЖНО:
-            # Если написано "3 Антон" или "3 на Антон",
-            # сначала проверяем, принадлежит ли №3
-            # этому пользователю.
-            #
-            # Если №3 НЕ принадлежит ему —
-            # это НЕ переименование.
-            # Передаём сообщение дальше в бронирование.
+            # ОПРЕДЕЛЯЕМ НОМЕРА ДЛЯ ПЕРЕИМЕНОВАНИЯ
             # =================================================
 
-            if rename["number"] is not None:
+            rename_numbers = rename.get("numbers")
 
-                number = rename["number"]
+            # Для старого формата одного номера
+            # оставляем совместимость.
+            if rename_numbers is None:
+                if rename.get("number") is not None:
+                    rename_numbers = [
+                        rename["number"]
+                    ]
 
-                matching_lots = [
-                    lot
-                    for lot in active_lotteries
-                    if number in lot["numbers"]
-                    and str(
-                        lot.get(
+            # =================================================
+            # ЕСЛИ УКАЗАНЫ КОНКРЕТНЫЕ НОМЕРА
+            #
+            # Например:
+            #
+            # 2 на Антон
+            # 2 10 на Антон
+            # 2,10 на Антон
+            # 2/10 на Антон
+            #
+            # Сначала проверяем, принадлежат ли эти номера
+            # текущему пользователю.
+            # =================================================
+
+            if rename_numbers is not None:
+
+                # Убираем возможные дубликаты,
+                # сохраняя порядок.
+                rename_numbers = list(
+                    dict.fromkeys(
+                        rename_numbers
+                    )
+                )
+
+                matching_lots = []
+
+                for lot in active_lotteries:
+
+                    owned_numbers = []
+
+                    for number in rename_numbers:
+
+                        if number not in lot["numbers"]:
+                            continue
+
+                        meta = lot.get(
                             "reservation_meta",
                             {}
                         ).get(
                             str(number),
                             {}
-                        ).get(
-                            "user_id",
-                            ""
                         )
-                    ) == str(user_id)
-                ]
+
+                        if (
+                            str(
+                                meta.get(
+                                    "user_id",
+                                    ""
+                                )
+                            )
+                            == str(user_id)
+                        ):
+                            owned_numbers.append(
+                                number
+                            )
+
+                    if owned_numbers:
+                        matching_lots.append(
+                            (
+                                lot,
+                                owned_numbers,
+                            )
+                        )
 
                 # ---------------------------------------------
-                # Номер уже принадлежит пользователю
-                # → это переименование
+                # Ни один из указанных номеров
+                # не принадлежит пользователю.
+                #
+                # Например:
+                #
+                # 3 Антон
+                #
+                # если №3 свободен.
+                #
+                # Тогда это НЕ переименование.
+                # Передаём сообщение дальше
+                # в БРОНИРОВАНИЕ.
                 # ---------------------------------------------
 
-                if matching_lots:
+                if not matching_lots:
 
-                    if len(matching_lots) > 1:
+                    # Только если это команда с "на",
+                    # но номер не принадлежит пользователю,
+                    # не возвращаемся.
+                    #
+                    # Это позволит обработать
+                    # "3 Антон" как обычную заявку,
+                    # если parse_reservation её поддерживает.
+                    if " на " in (
+                        f" {text.lower()} "
+                    ):
+                        pass
+
+                    else:
+                        return
+
+                else:
+
+                    # -----------------------------------------
+                    # Если указанные номера находятся
+                    # в нескольких лото — просим уточнить.
+                    # -----------------------------------------
+
+                    unique_lots = []
+
+                    for lot, owned_numbers in matching_lots:
+
+                        if lot not in unique_lots:
+                            unique_lots.append(lot)
+
+                    if len(unique_lots) > 1:
 
                         numbers = ", ".join(
                             f"№{lot['number']}"
-                            for lot in matching_lots
+                            for lot in unique_lots
                         )
 
                         await update.message.reply_text(
-                            "⚠️ Этот номер есть в нескольких "
-                            "активных лото: "
+                            "⚠️ Указанные вами номера "
+                            "есть в нескольких активных лото: "
                             + numbers
                             + ".\n"
                             "Укажите номер лото."
@@ -1912,37 +2052,81 @@ async def handle_lottery_reservation(update):
 
                         return
 
-                    lot = matching_lots[0]
+                    # -----------------------------------------
+                    # Нашли одно лото.
+                    # Переименовываем ВСЕ указанные номера,
+                    # которые принадлежат пользователю.
+                    # -----------------------------------------
 
-                    lot["owners"][number] = (
-                        rename["name"]
-                    )
+                    lot = unique_lots[0]
 
-                    meta = lot.get(
-                        "reservation_meta",
-                        {}
-                    )
+                    owned_numbers = []
 
-                    if str(number) in meta:
+                    for number in rename_numbers:
 
-                        meta[str(number)]["self"] = (
-                            normalize(
-                                rename["name"]
-                            )
-                            ==
-                            normalize(
-                                get_user_display_name(
-                                    update.effective_user
-                                )
-                            )
+                        if number not in lot["numbers"]:
+                            continue
+
+                        meta = lot.get(
+                            "reservation_meta",
+                            {}
+                        ).get(
+                            str(number),
+                            {}
                         )
 
-                    lot["reservation_meta"] = meta
+                        if (
+                            str(
+                                meta.get(
+                                    "user_id",
+                                    ""
+                                )
+                            )
+                            == str(user_id)
+                        ):
+                            owned_numbers.append(
+                                number
+                            )
+
+                    # -----------------------------------------
+                    # Переименовываем номера
+                    # -----------------------------------------
+
+                    for number in owned_numbers:
+
+                        lot["owners"][number] = (
+                            rename["name"]
+                        )
+
+                        meta = lot.get(
+                            "reservation_meta",
+                            {}
+                        )
+
+                        if str(number) in meta:
+
+                            meta[str(number)]["self"] = (
+                                normalize(
+                                    rename["name"]
+                                )
+                                ==
+                                normalize(
+                                    get_user_display_name(
+                                        update.effective_user
+                                    )
+                                )
+                            )
+
+                        lot["reservation_meta"] = meta
 
                     save_lottery(
                         lot,
                         active=True,
                     )
+
+                    # -----------------------------------------
+                    # Обновляем табло
+                    # -----------------------------------------
 
                     try:
                         await update.get_bot().edit_message_text(
@@ -1959,34 +2143,25 @@ async def handle_lottery_reservation(update):
 
                     await update.message.reply_text(
                         f"✅ Лото №{lot['number']}: "
-                        f"№{number} теперь записан за "
+                        f"номера "
+                        f"{', '.join(map(str, owned_numbers))} "
+                        f"теперь записаны за "
                         f"{rename['name']}."
                     )
 
                     return
 
-                # ---------------------------------------------
-                # Номер НЕ принадлежит пользователю.
-                #
-                # Это может быть обычная бронь:
-                #
-                # 3 Антон
-                #
-                # Поэтому НЕ делаем return.
-                # Код пойдёт дальше в БРОНИРОВАНИЕ.
-                # ---------------------------------------------
+            # =================================================
+            # ВСЕ СВОИ НОМЕРА
+            #
+            # Например:
+            #
+            # поменяйте на Антон
+            # перезапишите меня на Антон
+            # мои номера на Антон
+            # =================================================
 
             else:
-
-                # =================================================
-                # "поменяйте на Антон"
-                # "перезапишите меня на Антон"
-                # "мои номера на Антон"
-                #
-                # Здесь номер не указан.
-                # Поэтому это однозначно команда
-                # переименования.
-                # =================================================
 
                 matching_lots = []
 
@@ -2008,9 +2183,12 @@ async def handle_lottery_reservation(update):
                                     "user_id",
                                     ""
                                 )
-                            ) == str(user_id)
+                            )
+                            == str(user_id)
                         ):
-                            matching_lots.append(lot)
+                            matching_lots.append(
+                                lot
+                            )
                             break
 
                 if not matching_lots:
@@ -2060,14 +2238,31 @@ async def handle_lottery_reservation(update):
                                 "user_id",
                                 ""
                             )
-                        ) == str(user_id)
+                        )
+                        == str(user_id)
                     ):
 
                         lot["owners"][number] = (
                             rename["name"]
                         )
 
+                        if str(number) in meta:
+
+                            meta[str(number)]["self"] = (
+                                normalize(
+                                    rename["name"]
+                                )
+                                ==
+                                normalize(
+                                    get_user_display_name(
+                                        update.effective_user
+                                    )
+                                )
+                            )
+
                         changed.append(number)
+
+                lot["reservation_meta"] = meta
 
                 save_lottery(
                     lot,
