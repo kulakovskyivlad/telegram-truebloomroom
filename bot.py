@@ -41,14 +41,11 @@ LOTTERY_CHAT_ID = os.getenv("LOTTERY_CHAT_ID", "").strip()
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
-]
+]	
 
 
 web = Flask(__name__)
 
-@web.route("/health")
-def health():
-    return "OK", 200
 
 # Защищаем одновременные изменения лото.
 LOTTERY_LOCK = asyncio.Lock()
