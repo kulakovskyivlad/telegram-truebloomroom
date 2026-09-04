@@ -2990,7 +2990,7 @@ async def handle_admin_lottery_message(
         return
 
     if not lottery_topic_allowed(update):
-    return
+        return
 
     # Только групповые чаты.
     if update.effective_chat.type not in (
