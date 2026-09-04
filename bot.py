@@ -35,7 +35,7 @@ ALLOWED_USER_IDS = {
 # Если переменная не задана — лото может работать в любой группе,
 # где находится бот.
 LOTTERY_CHAT_ID = os.getenv("LOTTERY_CHAT_ID", "").strip()
-
+LOTTERY_TOPIC_ID = os.getenv("LOTTERY_TOPIC_ID", "").strip()
 
 # Боту нужна запись в Google Таблицу для сохранения состояния лото.
 SCOPES = [
@@ -412,6 +412,16 @@ def lottery_chat_allowed(chat_id):
 
     return str(chat_id) == LOTTERY_CHAT_ID
 
+def lottery_topic_allowed(update):
+    if not update.message:
+        return False
+
+    if not LOTTERY_TOPIC_ID:
+        return True
+
+    return str(
+        update.message.message_thread_id
+    ) == LOTTERY_TOPIC_ID
 
 def is_allowed_user(update):
     user = update.effective_user
@@ -1873,6 +1883,13 @@ def parse_rename_command(text):
 async def handle_lottery_reservation(update):
     if not update.message:
         return
+    if not lottery_chat_allowed(
+        update.effective_chat.id
+    ):
+        return
+
+    if not lottery_topic_allowed(update):
+        return
 
     text = (
         update.message.text
@@ -2971,6 +2988,9 @@ async def handle_admin_lottery_message(
         update.effective_chat.id
     ):
         return
+
+    if not lottery_topic_allowed(update):
+    return
 
     # Только групповые чаты.
     if update.effective_chat.type not in (
