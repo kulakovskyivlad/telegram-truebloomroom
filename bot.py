@@ -1880,6 +1880,21 @@ def parse_rename_command(text):
 
     return None
 
+def is_close_lottery_command(text):
+    if not text:
+        return False
+
+    text = normalize(text)
+
+    return text in {
+        "закрою",
+        "закрию",
+        "закрою лот",
+        "закрию лот",
+        "закрою лото",
+        "закрию лото",
+    }
+
 async def handle_lottery_reservation(update):
     if not update.message:
         return
@@ -1896,6 +1911,170 @@ async def handle_lottery_reservation(update):
         or update.message.caption
         or ""
     )
+    # ========================================================
+    # ЗАКРЫТИЕ ЛОТО КОМАНДОЙ
+    # ========================================================
+
+    if is_close_lottery_command(text):
+
+        async with LOTTERY_LOCK:
+
+            active_lotteries = read_lotteries()
+
+            # ---------------------------------------------
+            # Нет активных лото
+            # ---------------------------------------------
+
+            if not active_lotteries:
+                await update.message.reply_text(
+                    "❌ Сейчас нет активного лото."
+                )
+                return
+
+            # ---------------------------------------------
+            # Активно два лото
+            # ---------------------------------------------
+
+            if len(active_lotteries) > 1:
+
+                available = ", ".join(
+                    f"№{lot['number']}"
+                    for lot in active_lotteries
+                )
+
+                await update.message.reply_text(
+                    "⚠️ Сейчас активно два лото: "
+                    + available
+                    + ".\n"
+                    "Укажите номер лото."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Одно активное лото
+            # ---------------------------------------------
+
+            lot = active_lotteries[0]
+
+            # ---------------------------------------------
+            # Автор команды
+            # ---------------------------------------------
+
+            user_id = (
+                update.effective_user.id
+                if update.effective_user
+                else None
+            )
+
+            if not user_id:
+                return
+
+            telegram_name = get_user_display_name(
+                update.effective_user
+            )
+
+            # ---------------------------------------------
+            # Находим все свободные номерки
+            # ---------------------------------------------
+
+            remaining_numbers = [
+                number
+                for number in lot["numbers"]
+                if number not in lot["owners"]
+            ]
+
+            # ---------------------------------------------
+            # Если свободных номерков уже нет
+            # ---------------------------------------------
+
+            if not remaining_numbers:
+
+                close_lottery(lot)
+
+                try:
+                    await update.get_bot().edit_message_text(
+                        chat_id=lot["chat_id"],
+                        message_id=lot["board_message_id"],
+                        text=format_lottery(lot),
+                    )
+                except Exception as exc:
+                    print(
+                        f"LOTTERY BOARD UPDATE ERROR: "
+                        f"{exc}"
+                    )
+
+                await update.message.reply_text(
+                    f"🔴 Лото №{lot['number']} уже закрыто."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Записываем все оставшиеся номерки
+            # на автора команды
+            # ---------------------------------------------
+
+            reservation_meta = lot.get(
+                "reservation_meta",
+                {}
+            )
+
+            for number in remaining_numbers:
+
+                lot["owners"][number] = (
+                    telegram_name
+                )
+
+                reservation_meta[
+                    str(number)
+                ] = {
+                    "user_id": user_id,
+                    "self": True,
+                }
+
+            lot["reservation_meta"] = (
+                reservation_meta
+            )
+
+            # ---------------------------------------------
+            # Закрываем лото
+            # ---------------------------------------------
+
+            close_lottery(lot)
+
+            # ---------------------------------------------
+            # Обновляем табло
+            # ---------------------------------------------
+
+            try:
+                await update.get_bot().edit_message_text(
+                    chat_id=lot["chat_id"],
+                    message_id=lot["board_message_id"],
+                    text=format_lottery(lot),
+                )
+            except Exception as exc:
+                print(
+                    f"LOTTERY BOARD UPDATE ERROR: "
+                    f"{exc}"
+                )
+
+            # ---------------------------------------------
+            # Ответ
+            # ---------------------------------------------
+
+            numbers_text = ", ".join(
+                f"№{number}"
+                for number in remaining_numbers
+            )
+
+            await update.message.reply_text(
+                f"🔴 Лото №{lot['number']} закрыто.\n\n"
+                f"Записано на {telegram_name}:\n"
+                f"{numbers_text}"
+            )
+
+        return
 
     # ========================================================
     # НЕ ОБРАБАТЫВАЕМ СООБЩЕНИЕ, КОТОРОЕ СОЗДАЁТ НОВОЕ ЛОТО
