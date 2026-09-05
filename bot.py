@@ -1921,6 +1921,52 @@ def is_close_lottery_command(text):
         "закрою лото",
         "закрию лото",
     }
+def is_free_numbers_command(text):
+    if not text:
+        return False
+
+    text = normalize(text)
+
+    return text in {
+        "свободные номера",
+        "вільні номери",
+    }
+
+
+def format_free_numbers(lotteries):
+    """
+    Формирует список свободных номерков
+    по всем активным лото.
+    """
+
+    parts = []
+
+    for lot in lotteries:
+        free_numbers = [
+            number
+            for number in lot["numbers"]
+            if number not in lot["owners"]
+        ]
+
+        if free_numbers:
+            numbers_text = ", ".join(
+                map(str, free_numbers)
+            )
+
+            parts.append(
+                f"🟢 Лото №{lot['number']}:\n"
+                f"{numbers_text}"
+            )
+        else:
+            parts.append(
+                f"🔴 Лото №{lot['number']}:\n"
+                f"Свободных номеров нет."
+            )
+
+    return (
+        "🎟 <b>Свободные номера</b>\n\n"
+        + "\n\n".join(parts)
+    )
 
 async def handle_lottery_reservation(update):
     if not update.message:
