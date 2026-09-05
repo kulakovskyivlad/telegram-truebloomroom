@@ -861,6 +861,33 @@ def parse_reservation(
         text,
     )
 
+    # --------------------------------------------------------
+    # Считаем "и" / "і" разделителем между номерами.
+    #
+    # 1 и 2  ->  1 2
+    # 1 і 2  ->  1 2
+    # 12 и 13 -> 12 13
+    # 12 і 13 -> 12 13
+    #
+    # Но имена не затрагиваем:
+    # Ирина 1
+    # Полина и Влад 1 2
+    # --------------------------------------------------------
+
+    normalized_text = re.sub(
+        r"(?<=\d)\s+[иі]\s+(?=\d)",
+        " ",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
+
+    normalized_text = re.sub(
+        r"(?<=\d)[иі](?=\d)",
+        " ",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
+
     tokens = [
         token.strip()
         for token in normalized_text.split()
