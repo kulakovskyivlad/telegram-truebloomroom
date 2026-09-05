@@ -1984,44 +1984,38 @@ async def handle_lottery_reservation(update):
         or update.message.caption
         or ""
     )
+async with LOTTERY_LOCK:
+
+    # ====================================================
+    # СВОБОДНЫЕ НОМЕРА
+    # ====================================================
+
+    if is_free_numbers_command(text):
+
+        active_lotteries = read_lotteries()
+
+        if not active_lotteries:
+            await update.message.reply_text(
+                "Сейчас нет активных лото."
+            )
+            return
+
+        message = format_free_numbers(
+            active_lotteries
+        )
+
+        await update.message.reply_text(
+            message,
+            parse_mode="HTML",
+        )
+
+        return
     # ========================================================
     # ЗАКРЫТИЕ ЛОТО КОМАНДОЙ
     # ========================================================
 
     if is_close_lottery_command(text):
 
-        async with LOTTERY_LOCK:
-
-        # ====================================================
-        # СВОБОДНЫЕ НОМЕРА
-        #
-        # Свободные номера
-        # Вільні номери
-        #
-        # Показываем свободные номера
-        # по ВСЕМ активным лото.
-        # ====================================================
-
-        if is_free_numbers_command(text):
-
-            active_lotteries = read_lotteries()
-
-            if not active_lotteries:
-                await update.message.reply_text(
-                    "Сейчас нет активных лото."
-                )
-                return
-
-            message = format_free_numbers(
-                active_lotteries
-            )
-
-            await update.message.reply_text(
-                message,
-                parse_mode="HTML",
-            )
-
-            return
 
             active_lotteries = read_lotteries()
 
