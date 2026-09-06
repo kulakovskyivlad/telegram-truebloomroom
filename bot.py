@@ -2010,6 +2010,24 @@ async def handle_lottery_reservation(update):
         )
 
         return
+
+def parse_release_number_command(text):
+    if not text:
+        return None
+
+    text = normalize(text)
+
+    match = re.fullmatch(
+        r"освободить\s+(\d+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return None
+
+    return int(match.group(1))
+
     # ========================================================
     # ЗАКРЫТИЕ ЛОТО КОМАНДОЙ
     # ========================================================
@@ -2188,6 +2206,188 @@ async def handle_lottery_reservation(update):
 
     async with LOTTERY_LOCK:
 
+    # ====================================================
+    # ОСВОБОЖДЕНИЕ НОМЕРКА АДМИНИСТРАТОРОМ
+    # ====================================================
+
+    release_number = parse_release_number_command(text)
+
+    if release_number is not None:
+
+        # ---------------------------------------------
+        # Проверяем администратора
+        # ---------------------------------------------
+
+        is_admin = False
+
+        if update.effective_chat and update.effective_user:
+
+            try:
+                member = await update.effective_chat.get_member(
+                    update.effective_user.id
+                )
+
+                is_admin = member.status in (
+                    "administrator",
+                    "creator",
+                )
+
+            except Exception as exc:
+                print(
+                    f"ADMIN CHECK ERROR: {exc}"
+                )
+
+        if not is_admin:
+
+            await update.message.reply_text(
+                "❌ Эта команда доступна только администраторам."
+            )
+
+            return
+
+        # ---------------------------------------------
+        # Читаем активные лото
+        # ---------------------------------------------
+
+        active_lotteries = read_lotteries()
+
+        if not active_lotteries:
+
+            await update.message.reply_text(
+                "❌ Сейчас нет активного лото."
+            )
+
+            return
+
+        # ---------------------------------------------
+        # Ищем лото, где этот номерок занят
+        # ---------------------------------------------
+
+        matching_lots = []
+
+        for lot in active_lotteries:
+
+            if (
+                release_number in lot["numbers"]
+                and release_number in lot["owners"]
+            ):
+                matching_lots.append(lot)
+
+        # ---------------------------------------------
+        # Номерок не найден среди занятых
+        # ---------------------------------------------
+
+        if not matching_lots:
+
+            number_exists = any(
+                release_number in lot["numbers"]
+                for lot in active_lotteries
+            )
+
+            if number_exists:
+
+                await update.message.reply_text(
+                    f"ℹ️ Номерок №{release_number} уже свободен."
+                )
+
+            else:
+
+                await update.message.reply_text(
+                    f"❌ Номерок №{release_number} "
+                    "не найден в активных лото."
+                )
+
+            return
+
+        # ---------------------------------------------
+        # Номерок занят сразу в нескольких лото
+        # ---------------------------------------------
+
+        if len(matching_lots) > 1:
+
+            available = ", ".join(
+                f"№{lot['number']}"
+                for lot in matching_lots
+            )
+
+            await update.message.reply_text(
+                f"⚠️ Номерок №{release_number} "
+                f"занят в нескольких лото: "
+                f"{available}.\n"
+                "Укажите номер лото."
+            )
+
+            return
+
+        # ---------------------------------------------
+        # Нашли нужное лото
+        # ---------------------------------------------
+
+        lot = matching_lots[0]
+
+        old_owner = lot["owners"].get(
+            release_number
+        )
+
+        # ---------------------------------------------
+        # Освобождаем номерок
+        # ---------------------------------------------
+
+        del lot["owners"][release_number]
+
+        reservation_meta = lot.get(
+            "reservation_meta",
+            {}
+        )
+
+        reservation_meta.pop(
+            str(release_number),
+            None
+        )
+
+        lot["reservation_meta"] = (
+            reservation_meta
+        )
+
+        # ---------------------------------------------
+        # Сохраняем активное лото
+        # ---------------------------------------------
+
+        save_lottery(
+            lot,
+            active=True
+        )
+
+        # ---------------------------------------------
+        # Обновляем табло
+        # ---------------------------------------------
+
+        try:
+
+            await update.get_bot().edit_message_text(
+                chat_id=lot["chat_id"],
+                message_id=lot["board_message_id"],
+                text=format_lottery(lot),
+            )
+
+        except Exception as exc:
+
+            print(
+                f"LOTTERY BOARD UPDATE ERROR: "
+                f"{exc}"
+            )
+
+        # ---------------------------------------------
+        # Ответ администратору
+        # ---------------------------------------------
+
+        await update.message.reply_text(
+            f"🟢 Лото №{lot['number']}: "
+            f"номерок №{release_number} освобождён.\n"
+            f"Был записан на: {old_owner}"
+        )
+
+        return
         # ====================================================
         # ПЕРЕИМЕНОВАНИЕ
         # ====================================================
