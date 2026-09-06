@@ -1984,7 +1984,7 @@ async def handle_lottery_reservation(update):
         or update.message.caption
         or ""
     )
-async with LOTTERY_LOCK:
+
 
     # ====================================================
     # СВОБОДНЫЕ НОМЕРА
@@ -2016,6 +2016,7 @@ async with LOTTERY_LOCK:
 
     if is_close_lottery_command(text):
 
+        async with LOTTERY_LOCK:
 
             active_lotteries = read_lotteries()
 
