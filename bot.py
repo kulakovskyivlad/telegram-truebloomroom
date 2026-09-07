@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import threading
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
@@ -3622,10 +3623,19 @@ def telegram_webhook():
 # START
 # ============================================================
 
+def start_webhook():
+    try:
+        asyncio.run(set_webhook())
+        print("WEBHOOK SET SUCCESSFULLY")
+    except Exception as exc:
+        print(f"WEBHOOK SET ERROR: {type(exc).__name__}: {exc}")
+
+
 if __name__ == "__main__":
-    asyncio.run(
-        set_webhook()
-    )
+    threading.Thread(
+        target=start_webhook,
+        daemon=True,
+    ).start()
 
     web.run(
         host="0.0.0.0",
