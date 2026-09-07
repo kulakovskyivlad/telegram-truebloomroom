@@ -2011,22 +2011,22 @@ async def handle_lottery_reservation(update):
 
         return
 
-def parse_release_number_command(text):
-    if not text:
-        return None
+    def parse_release_number_command(text):
+        if not text:
+            return None
 
-    text = normalize(text)
+        text = normalize(text)
 
-    match = re.fullmatch(
-        r"освободить\s+(\d+)",
-        text,
-        flags=re.IGNORECASE,
-    )
+        match = re.fullmatch(
+            r"освободить\s+(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        )
 
-    if not match:
-        return None
+        if not match:
+            return None
 
-    return int(match.group(1))
+        return int(match.group(1))
 
     # ========================================================
     # ЗАКРЫТИЕ ЛОТО КОМАНДОЙ
@@ -2206,44 +2206,44 @@ def parse_release_number_command(text):
 
     async with LOTTERY_LOCK:
 
-    # ====================================================
-    # ОСВОБОЖДЕНИЕ НОМЕРКА АДМИНИСТРАТОРОМ
-    # ====================================================
+        # ====================================================
+        # ОСВОБОЖДЕНИЕ НОМЕРКА АДМИНИСТРАТОРОМ
+        # ====================================================
 
-    release_number = parse_release_number_command(text)
+        release_number = parse_release_number_command(text)
 
-    if release_number is not None:
+        if release_number is not None:
 
-        # ---------------------------------------------
-        # Проверяем администратора
-        # ---------------------------------------------
+            # ---------------------------------------------
+            # Проверяем администратора
+            # ---------------------------------------------
 
-        is_admin = False
+            is_admin = False
 
-        if update.effective_chat and update.effective_user:
+            if update.effective_chat and update.effective_user:
 
-            try:
-                member = await update.effective_chat.get_member(
-                    update.effective_user.id
+                try:
+                    member = await update.effective_chat.get_member(
+                        update.effective_user.id
+                    )
+
+                    is_admin = member.status in (
+                        "administrator",
+                        "creator",
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"ADMIN CHECK ERROR: {exc}"
+                    )
+
+            if not is_admin:
+
+                await update.message.reply_text(
+                    "❌ Эта команда доступна только администраторам."
                 )
 
-                is_admin = member.status in (
-                    "administrator",
-                    "creator",
-                )
-
-            except Exception as exc:
-                print(
-                    f"ADMIN CHECK ERROR: {exc}"
-                )
-
-        if not is_admin:
-
-            await update.message.reply_text(
-                "❌ Эта команда доступна только администраторам."
-            )
-
-            return
+                return
 
         # ---------------------------------------------
         # Читаем активные лото
