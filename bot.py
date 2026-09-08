@@ -47,9 +47,10 @@ SCOPES = [
 
 web = Flask(__name__)
 
-
-# Защищаем одновременные изменения лото.
-LOTTERY_LOCK = asyncio.Lock()
+application = None
+BOT_LOOP = None
+BOT_READY = threading.Event()
+LOTTERY_LOCK = None
 
 
 # ============================================================
@@ -3537,41 +3538,51 @@ def build_application():
 # WEBHOOK
 # ============================================================
 
-async def set_webhook():
-    app = build_application()
+async def bot_startup():
+    global application, LOTTERY_LOCK
 
-    await app.initialize()
+    application = build_application()
+
+    LOTTERY_LOCK = asyncio.Lock()
+
+    await application.initialize()
+    await application.start()
+
+    await application.bot.set_webhook(
+        url=f"{RENDER_EXTERNAL_URL}/telegram",
+        drop_pending_updates=True,
+    )
+
+    BOT_READY.set()
+
+    # Держим event loop постоянно запущенным
+    await asyncio.Event().wait()
+
+
+def run_bot_loop():
+    global BOT_LOOP
+
+    BOT_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(BOT_LOOP)
 
     try:
-        await app.bot.set_webhook(
-            url=(
-                f"{RENDER_EXTERNAL_URL}"
-                "/telegram"
-            ),
-            drop_pending_updates=True,
+        BOT_LOOP.run_until_complete(bot_startup())
+    except Exception as exc:
+        print(
+            f"BOT LOOP ERROR: "
+            f"{type(exc).__name__}: {exc}"
         )
-
-    finally:
-        await app.shutdown()
 
 
 async def process_update(data):
-    app = build_application()
+    update = Update.de_json(
+        data,
+        application.bot,
+    )
 
-    await app.initialize()
-
-    try:
-        update = Update.de_json(
-            data,
-            app.bot,
-        )
-
-        await app.process_update(
-            update
-        )
-
-    finally:
-        await app.shutdown()
+    await application.process_update(
+        update
+    )
 
 
 @web.get("/")
@@ -3589,34 +3600,32 @@ def health():
 
 @web.post("/telegram")
 def telegram_webhook():
-    data = request.get_json(
-        silent=True
-    )
+    data = request.get_json(silent=True)
 
     if not data:
-        return (
-            "Bad Request",
-            400,
-        )
+        return ("Bad Request", 400)
+
+    # Ждем запуска Telegram Application
+    if not BOT_READY.wait(timeout=30):
+        return ("Bot is not ready", 503)
 
     try:
-        asyncio.run(
-            process_update(data)
+        future = asyncio.run_coroutine_threadsafe(
+            process_update(data),
+            BOT_LOOP,
         )
+
+        future.result(timeout=50)
 
         return "OK", 200
 
     except Exception as exc:
         print(
             f"WEBHOOK ERROR: "
-            f"{type(exc).__name__}: "
-            f"{exc}"
+            f"{type(exc).__name__}: {exc}"
         )
 
-        return (
-            "Internal Server Error",
-            500,
-        )
+        return ("Internal Server Error", 500)
 
 
 # ============================================================
@@ -3632,10 +3641,17 @@ def start_webhook():
 
 
 if __name__ == "__main__":
-    threading.Thread(
-        target=start_webhook,
+    bot_thread = threading.Thread(
+        target=run_bot_loop,
         daemon=True,
-    ).start()
+    )
+
+    bot_thread.start()
+
+    if not BOT_READY.wait(timeout=30):
+        raise RuntimeError(
+            "Telegram bot failed to start"
+        )
 
     web.run(
         host="0.0.0.0",
