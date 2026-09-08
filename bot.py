@@ -543,7 +543,7 @@ def format_lottery(lot):
             )
         else:
             lines.append(
-                f"{number} — свободен"
+                f"{number} —"
             )
 
     free = sum(
