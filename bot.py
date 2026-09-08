@@ -333,6 +333,12 @@ def total_for_rows(rows, source=None):
 
 
 def format_group(title, rows):
+    rows = [
+        r
+        for r in rows
+        if r["Осталось"] not in (0, "0", "", None)
+    ]
+
     if not rows:
         return (
             f"{title}\n"
