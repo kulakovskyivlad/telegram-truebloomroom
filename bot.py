@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import threading
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
@@ -46,9 +47,10 @@ SCOPES = [
 
 web = Flask(__name__)
 
-
-# Защищаем одновременные изменения лото.
-LOTTERY_LOCK = asyncio.Lock()
+application = None
+BOT_LOOP = None
+BOT_READY = threading.Event()
+LOTTERY_LOCK = None
 
 
 # ============================================================
@@ -331,6 +333,12 @@ def total_for_rows(rows, source=None):
 
 
 def format_group(title, rows):
+    rows = [
+        r
+        for r in rows
+        if r["Осталось"] not in (0, "0", "", None)
+    ]
+
     if not rows:
         return (
             f"{title}\n"
@@ -541,7 +549,7 @@ def format_lottery(lot):
             )
         else:
             lines.append(
-                f"{number} — свободен"
+                f"{number} —"
             )
 
     free = sum(
@@ -2010,6 +2018,24 @@ async def handle_lottery_reservation(update):
         )
 
         return
+
+    def parse_release_number_command(text):
+        if not text:
+            return None
+
+        text = normalize(text)
+
+        match = re.fullmatch(
+            r"освободить\s+(\d+)",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return None
+
+        return int(match.group(1))
+
     # ========================================================
     # ЗАКРЫТИЕ ЛОТО КОМАНДОЙ
     # ========================================================
@@ -2187,6 +2213,189 @@ async def handle_lottery_reservation(update):
         return
 
     async with LOTTERY_LOCK:
+
+        # ====================================================
+        # ОСВОБОЖДЕНИЕ НОМЕРКА АДМИНИСТРАТОРОМ
+        # ====================================================
+
+        release_number = parse_release_number_command(text)
+
+        if release_number is not None:
+
+            # ---------------------------------------------
+            # Проверяем администратора
+            # ---------------------------------------------
+
+            is_admin = False
+
+            if update.effective_chat and update.effective_user:
+
+                try:
+                    member = await update.effective_chat.get_member(
+                        update.effective_user.id
+                    )
+
+                    is_admin = member.status in (
+                        "administrator",
+                        "creator",
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"ADMIN CHECK ERROR: {exc}"
+                    )
+
+            if not is_admin:
+
+                await update.message.reply_text(
+                    "❌ Эта команда доступна только администраторам."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Читаем активные лото
+            # ---------------------------------------------
+
+            active_lotteries = read_lotteries()
+
+            if not active_lotteries:
+
+                await update.message.reply_text(
+                    "❌ Сейчас нет активного лото."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Ищем лото, где этот номерок занят
+            # ---------------------------------------------
+
+            matching_lots = []
+
+            for lot in active_lotteries:
+
+                if (
+                    release_number in lot["numbers"]
+                    and release_number in lot["owners"]
+                ):
+                    matching_lots.append(lot)
+
+            # ---------------------------------------------
+            # Номерок не найден среди занятых
+            # ---------------------------------------------
+
+            if not matching_lots:
+
+                number_exists = any(
+                    release_number in lot["numbers"]
+                    for lot in active_lotteries
+                )
+
+                if number_exists:
+
+                    await update.message.reply_text(
+                        f"ℹ️ Номерок №{release_number} уже свободен."
+                    )
+
+                else:
+
+                    await update.message.reply_text(
+                        f"❌ Номерок №{release_number} "
+                        "не найден в активных лото."
+                    )
+
+                return
+
+            # ---------------------------------------------
+            # Номерок занят сразу в нескольких лото
+            # ---------------------------------------------
+
+            if len(matching_lots) > 1:
+
+                available = ", ".join(
+                    f"№{lot['number']}"
+                    for lot in matching_lots
+                )
+
+                await update.message.reply_text(
+                    f"⚠️ Номерок №{release_number} "
+                    f"занят в нескольких лото: "
+                    f"{available}.\n"
+                    "Укажите номер лото."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Нашли нужное лото
+            # ---------------------------------------------
+
+            lot = matching_lots[0]
+
+            old_owner = lot["owners"].get(
+                release_number
+            )
+
+            # ---------------------------------------------
+            # Освобождаем номерок
+            # ---------------------------------------------
+
+            del lot["owners"][release_number]
+
+            reservation_meta = lot.get(
+                "reservation_meta",
+                {}
+            )
+
+            reservation_meta.pop(
+                str(release_number),
+                None
+            )
+
+            lot["reservation_meta"] = (
+                reservation_meta
+            )
+
+            # ---------------------------------------------
+            # Сохраняем активное лото
+            # ---------------------------------------------
+
+            save_lottery(
+                lot,
+                active=True
+            )
+
+            # ---------------------------------------------
+            # Обновляем табло
+            # ---------------------------------------------
+
+            try:
+
+                await update.get_bot().edit_message_text(
+                    chat_id=lot["chat_id"],
+                    message_id=lot["board_message_id"],
+                    text=format_lottery(lot),
+                )
+
+            except Exception as exc:
+
+                print(
+                    f"LOTTERY BOARD UPDATE ERROR: "
+                    f"{exc}"
+                )
+
+            # ---------------------------------------------
+            # Ответ администратору
+            # ---------------------------------------------
+
+            await update.message.reply_text(
+                f"🟢 Лото №{lot['number']}: "
+                f"номерок №{release_number} освобождён.\n"
+                f"Был записан на: {old_owner}"
+            )
+
+            return
 
         # ====================================================
         # ПЕРЕИМЕНОВАНИЕ
@@ -3335,41 +3544,51 @@ def build_application():
 # WEBHOOK
 # ============================================================
 
-async def set_webhook():
-    app = build_application()
+async def bot_startup():
+    global application, LOTTERY_LOCK
 
-    await app.initialize()
+    application = build_application()
+
+    LOTTERY_LOCK = asyncio.Lock()
+
+    await application.initialize()
+    await application.start()
+
+    await application.bot.set_webhook(
+        url=f"{RENDER_EXTERNAL_URL}/telegram",
+        drop_pending_updates=True,
+    )
+
+    BOT_READY.set()
+
+    # Держим event loop постоянно запущенным
+    await asyncio.Event().wait()
+
+
+def run_bot_loop():
+    global BOT_LOOP
+
+    BOT_LOOP = asyncio.new_event_loop()
+    asyncio.set_event_loop(BOT_LOOP)
 
     try:
-        await app.bot.set_webhook(
-            url=(
-                f"{RENDER_EXTERNAL_URL}"
-                "/telegram"
-            ),
-            drop_pending_updates=True,
+        BOT_LOOP.run_until_complete(bot_startup())
+    except Exception as exc:
+        print(
+            f"BOT LOOP ERROR: "
+            f"{type(exc).__name__}: {exc}"
         )
-
-    finally:
-        await app.shutdown()
 
 
 async def process_update(data):
-    app = build_application()
+    update = Update.de_json(
+        data,
+        application.bot,
+    )
 
-    await app.initialize()
-
-    try:
-        update = Update.de_json(
-            data,
-            app.bot,
-        )
-
-        await app.process_update(
-            update
-        )
-
-    finally:
-        await app.shutdown()
+    await application.process_update(
+        update
+    )
 
 
 @web.get("/")
@@ -3387,44 +3606,58 @@ def health():
 
 @web.post("/telegram")
 def telegram_webhook():
-    data = request.get_json(
-        silent=True
-    )
+    data = request.get_json(silent=True)
 
     if not data:
-        return (
-            "Bad Request",
-            400,
-        )
+        return ("Bad Request", 400)
+
+    # Ждем запуска Telegram Application
+    if not BOT_READY.wait(timeout=30):
+        return ("Bot is not ready", 503)
 
     try:
-        asyncio.run(
-            process_update(data)
+        future = asyncio.run_coroutine_threadsafe(
+            process_update(data),
+            BOT_LOOP,
         )
+
+        future.result(timeout=50)
 
         return "OK", 200
 
     except Exception as exc:
         print(
             f"WEBHOOK ERROR: "
-            f"{type(exc).__name__}: "
-            f"{exc}"
+            f"{type(exc).__name__}: {exc}"
         )
 
-        return (
-            "Internal Server Error",
-            500,
-        )
+        return ("Internal Server Error", 500)
 
 
 # ============================================================
 # START
 # ============================================================
 
+def start_webhook():
+    try:
+        asyncio.run(set_webhook())
+        print("WEBHOOK SET SUCCESSFULLY")
+    except Exception as exc:
+        print(f"WEBHOOK SET ERROR: {type(exc).__name__}: {exc}")
+
+
 if __name__ == "__main__":
-    asyncio.run(
-        set_webhook()
+    bot_thread = threading.Thread(
+        target=run_bot_loop,
+        daemon=True,
     )
+
+    bot_thread.start()
+
+    if not BOT_READY.wait(timeout=30):
+        raise RuntimeError(
+            "Telegram bot failed to start"
+        )
 
     web.run(
         host="0.0.0.0",
