@@ -3333,7 +3333,7 @@ async def handle_lottery_reservation(update):
                 (
                     f"№{item['number']} — {item['name']}"
                     + (
-                        f"\n{random.choice(phrases[item['number']])}"
+                        f"\n\n{random.choice(phrases[item['number']])}"
                         if item["number"] in phrases
                         else ""
                     )
