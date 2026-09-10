@@ -164,19 +164,12 @@ def get_lottery_phrases():
 
     rows = worksheet.get_all_records()
 
-    print("DEBUG: строки Фразы_лото:", rows)
 
     phrases = {}
 
     for row in rows:
         number = row.get("Номер")
         phrase = row.get("Фраза")
-
-        print(
-            "DEBUG: строка:",
-            "Номер =", repr(number),
-            "Фраза =", repr(phrase)
-        )
 
         if not number or not phrase:
             continue
@@ -193,7 +186,6 @@ def get_lottery_phrases():
 
         phrases.setdefault(number, []).append(phrase)
 
-    print("DEBUG: готовые фразы:", phrases)
 
     return phrases
 
