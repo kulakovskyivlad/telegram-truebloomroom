@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import random
 import threading
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -140,6 +141,54 @@ def get_lottery_worksheet():
             )
 
     return worksheet
+
+def get_lottery_phrases():
+    """
+    Читает лист Фразы_лото и возвращает:
+    {
+        номер: [фраза1, фраза2, ...]
+    }
+    """
+
+    print("DEBUG: начинаю читать Фразы_лото")
+
+    spreadsheet = get_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet("Фразы_лото")
+    except gspread.WorksheetNotFound:
+        print("DEBUG: лист Фразы_лото НЕ НАЙДЕН")
+        return {}
+
+    print("DEBUG: лист Фразы_лото найден")
+
+    rows = worksheet.get_all_records()
+
+
+    phrases = {}
+
+    for row in rows:
+        number = row.get("Номер")
+        phrase = row.get("Фраза")
+
+        if not number or not phrase:
+            continue
+
+        try:
+            number = int(number)
+        except (ValueError, TypeError):
+            continue
+
+        phrase = str(phrase).strip()
+
+        if not phrase:
+            continue
+
+        phrases.setdefault(number, []).append(phrase)
+
+
+    return phrases
+
 
 
 # ============================================================
@@ -3265,10 +3314,19 @@ async def handle_lottery_reservation(update):
             "Записано:"
         )
 
+        phrases = get_lottery_phrases()
+
+
         response.append(
             "\n".join(
-                f"№{item['number']} — "
-                f"{item['name']}"
+                (
+                    f"№{item['number']} — {item['name']}"
+                    + (
+                        f"\n\n{random.choice(phrases[item['number']])}"
+                        if item["number"] in phrases
+                        else ""
+                    )
+                )
                 for item in booked
             )
         )
