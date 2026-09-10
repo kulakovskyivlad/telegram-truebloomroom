@@ -144,35 +144,39 @@ def get_lottery_worksheet():
 
 def get_lottery_phrases():
     """
-    Читает лист 'Фразы_лото'.
-
-    Ожидаемый формат:
-    Номер | Фраза
-    3     | 🍀 Удачный номер!
-    3     | ✨ Вам обязательно повезёт!
-    7     | 🎯 Прямо в цель!
-
-    Возвращает словарь:
+    Читает лист Фразы_лото и возвращает:
     {
-        3: ["🍀 Удачный номер!", "✨ Вам обязательно повезёт!"],
-        7: ["🎯 Прямо в цель!"]
+        номер: [фраза1, фраза2, ...]
     }
     """
+
+    print("DEBUG: начинаю читать Фразы_лото")
 
     spreadsheet = get_spreadsheet()
 
     try:
         worksheet = spreadsheet.worksheet("Фразы_лото")
     except gspread.WorksheetNotFound:
+        print("DEBUG: лист Фразы_лото НЕ НАЙДЕН")
         return {}
 
+    print("DEBUG: лист Фразы_лото найден")
+
     rows = worksheet.get_all_records()
+
+    print("DEBUG: строки Фразы_лото:", rows)
 
     phrases = {}
 
     for row in rows:
         number = row.get("Номер")
         phrase = row.get("Фраза")
+
+        print(
+            "DEBUG: строка:",
+            "Номер =", repr(number),
+            "Фраза =", repr(phrase)
+        )
 
         if not number or not phrase:
             continue
@@ -188,6 +192,8 @@ def get_lottery_phrases():
             continue
 
         phrases.setdefault(number, []).append(phrase)
+
+    print("DEBUG: готовые фразы:", phrases)
 
     return phrases
 
