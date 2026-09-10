@@ -3310,6 +3310,8 @@ async def handle_lottery_reservation(update):
 
         phrases = get_lottery_phrases()
 
+        print("DEBUG ФРАЗЫ:", phrases)
+
         response = [
             f"✅ Лото №{lottery_number}"
         ]
