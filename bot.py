@@ -2,6 +2,7 @@ import os
 import re
 import json
 import asyncio
+import random
 import threading
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -140,6 +141,56 @@ def get_lottery_worksheet():
             )
 
     return worksheet
+
+def get_lottery_phrases():
+    """
+    Читает лист 'Фразы_лото'.
+
+    Ожидаемый формат:
+    Номер | Фраза
+    3     | 🍀 Удачный номер!
+    3     | ✨ Вам обязательно повезёт!
+    7     | 🎯 Прямо в цель!
+
+    Возвращает словарь:
+    {
+        3: ["🍀 Удачный номер!", "✨ Вам обязательно повезёт!"],
+        7: ["🎯 Прямо в цель!"]
+    }
+    """
+
+    spreadsheet = get_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet("Фразы_лото")
+    except gspread.WorksheetNotFound:
+        return {}
+
+    rows = worksheet.get_all_records()
+
+    phrases = {}
+
+    for row in rows:
+        number = row.get("Номер")
+        phrase = row.get("Фраза")
+
+        if not number or not phrase:
+            continue
+
+        try:
+            number = int(number)
+        except (ValueError, TypeError):
+            continue
+
+        phrase = str(phrase).strip()
+
+        if not phrase:
+            continue
+
+        phrases.setdefault(number, []).append(phrase)
+
+    return phrases
+
 
 
 # ============================================================
@@ -3257,6 +3308,8 @@ async def handle_lottery_reservation(update):
         # Формируем ответ.
         # ----------------------------------------------------
 
+        phrases = get_lottery_phrases()
+
         response = [
             f"✅ Лото №{lottery_number}"
         ]
@@ -3267,8 +3320,14 @@ async def handle_lottery_reservation(update):
 
         response.append(
             "\n".join(
-                f"№{item['number']} — "
-                f"{item['name']}"
+                (
+                    f"№{item['number']} — {item['name']}"
+                    + (
+                        f"\n{random.choice(phrases[item['number']])}"
+                        if item["number"] in phrases
+                        else ""
+                    )
+                )
                 for item in booked
             )
         )
