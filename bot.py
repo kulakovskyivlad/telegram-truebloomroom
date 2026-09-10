@@ -2026,7 +2026,6 @@ def format_free_numbers(lotteries):
     )
 
 async def handle_lottery_reservation(update):
-    print("🔥🔥🔥 НОВАЯ ВЕРСИЯ handle_lottery_reservation ЗАПУЩЕНА 🔥🔥🔥", flush=True)
     if not update.message:
         return
     if not lottery_chat_allowed(
@@ -3317,8 +3316,6 @@ async def handle_lottery_reservation(update):
 
         phrases = get_lottery_phrases()
 
-        print("DEBUG phrases =", phrases, flush=True)
-        print("DEBUG booked =", booked, flush=True)
 
         response.append(
             "\n".join(
