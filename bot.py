@@ -3308,10 +3308,6 @@ async def handle_lottery_reservation(update):
         # Формируем ответ.
         # ----------------------------------------------------
 
-        phrases = get_lottery_phrases()
-
-        print("DEBUG ФРАЗЫ:", phrases)
-
         response = [
             f"✅ Лото №{lottery_number}"
         ]
@@ -3319,6 +3315,8 @@ async def handle_lottery_reservation(update):
         response.append(
             "Записано:"
         )
+
+        phrases = get_lottery_phrases()
 
         response.append(
             "\n".join(
