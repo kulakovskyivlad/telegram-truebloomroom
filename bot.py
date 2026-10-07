@@ -1990,6 +1990,21 @@ def is_free_numbers_command(text):
     }
 
 
+def get_lottery_message_link(lot):
+    chat_id = str(lot["chat_id"])
+    message_id = lot["source_message_id"]
+
+    if chat_id.startswith("-100"):
+        internal_chat_id = chat_id[4:]
+        return (
+            f"https://t.me/c/"
+            f"{internal_chat_id}/"
+            f"{message_id}"
+        )
+
+    return None
+
+
 def format_free_numbers(lotteries):
     """
     Формирует список свободных номерков
@@ -1999,11 +2014,25 @@ def format_free_numbers(lotteries):
     parts = []
 
     for lot in lotteries:
+
         free_numbers = [
             number
             for number in lot["numbers"]
             if number not in lot["owners"]
         ]
+
+        link = get_lottery_message_link(lot)
+
+        if link:
+            lot_title = (
+                f'<a href="{link}">'
+                f"🟢 Лото №{lot['number']} — перейти к лоту"
+                f"</a>"
+            )
+        else:
+            lot_title = (
+                f"🟢 Лото №{lot['number']}"
+            )
 
         if free_numbers:
             numbers_text = ", ".join(
@@ -2011,12 +2040,13 @@ def format_free_numbers(lotteries):
             )
 
             parts.append(
-                f"🟢 Лото №{lot['number']}:\n"
+                f"{lot_title}\n"
                 f"{numbers_text}"
             )
+
         else:
             parts.append(
-                f"🔴 Лото №{lot['number']}:\n"
+                f"🔴 Лото №{lot['number']}\n"
                 f"Свободных номеров нет."
             )
 
