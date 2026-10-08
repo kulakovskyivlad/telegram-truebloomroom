@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 import gspread
 from google.oauth2.service_account import Credentials
 from flask import Flask, request
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 
@@ -1987,6 +1987,7 @@ def is_free_numbers_command(text):
     return text in {
         "свободные номера",
         "вільні номери",
+        "🎟 свободные номера",
     }
 
 
@@ -3408,6 +3409,14 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     if not is_allowed_user(update):
+        keyboard = [
+            ["🎟 Свободные номера"],
+        ]
+
+        reply_markup = ReplyKeyboardMarkup(
+            keyboard,
+            resize_keyboard=True,
+        )
         await update.message.reply_text(
     "Привет! 👋\n\n"
     "Остатки: «остатки» "
@@ -3421,6 +3430,7 @@ async def start(
     "165 5,6\n\n"
     "Можно изменить имя:\n"
     "5 на Иванович"
+    reply_markup=reply_markup,
         )
 
 
