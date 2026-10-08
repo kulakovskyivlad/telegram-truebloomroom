@@ -14,6 +14,7 @@ from telegram import (
     Update,
     BotCommand,
     BotCommandScopeAllGroupChats,
+    MenuButtonCommands,
 )
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -3697,6 +3698,10 @@ async def bot_startup():
             ),
         ],
         scope=BotCommandScopeAllGroupChats(),
+    )
+
+    await application.bot.set_chat_menu_button(
+        menu_button=MenuButtonCommands()
     )
 
     await application.bot.set_webhook(
