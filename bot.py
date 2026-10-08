@@ -13,7 +13,6 @@ from flask import Flask, request
 from telegram import (
     Update,
     BotCommand,
-    BotCommandScopeAllGroupChats,
     MenuButtonCommands,
 )
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -3697,7 +3696,6 @@ async def bot_startup():
                 "Мой Telegram ID",
             ),
         ],
-        scope=BotCommandScopeAllGroupChats(),
     )
 
     await application.bot.set_chat_menu_button(
