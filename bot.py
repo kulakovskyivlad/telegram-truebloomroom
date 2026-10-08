@@ -10,7 +10,11 @@ from difflib import SequenceMatcher
 import gspread
 from google.oauth2.service_account import Credentials
 from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+)
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 
@@ -1987,7 +1991,6 @@ def is_free_numbers_command(text):
     return text in {
         "свободные номера",
         "вільні номери",
-        "🎟 свободные номера",
     }
 
 
@@ -2054,6 +2057,38 @@ def format_free_numbers(lotteries):
     return (
         "🎟 <b>Свободные номера</b>\n\n"
         + "\n\n".join(parts)
+    )
+
+async def free_numbers_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not update.message:
+        return
+
+    if not lottery_chat_allowed(
+        update.effective_chat.id
+    ):
+        return
+
+    if not lottery_topic_allowed(update):
+        return
+
+    active_lotteries = read_lotteries()
+
+    if not active_lotteries:
+        await update.message.reply_text(
+            "Сейчас нет активных лото."
+        )
+        return
+
+    message = format_free_numbers(
+        active_lotteries
+    )
+
+    await update.message.reply_text(
+        message,
+        parse_mode="HTML",
     )
 
 async def handle_lottery_reservation(update):
@@ -3409,14 +3444,6 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     if not is_allowed_user(update):
-        keyboard = [
-            ["🎟 Свободные номера"],
-        ]
-
-        reply_markup = ReplyKeyboardMarkup(
-            keyboard,
-            resize_keyboard=True,
-        )
         await update.message.reply_text(
     "Привет! 👋\n\n"
     "Остатки: «остатки» "
@@ -3429,8 +3456,7 @@ async def start(
     "Если активно два лото, укажите номер:\n"
     "165 5,6\n\n"
     "Можно изменить имя:\n"
-    "5 на Иванович",
-    reply_markup=reply_markup,
+    "5 на Иванович"
         )
 
 
@@ -3615,6 +3641,13 @@ def build_application():
             my_id,
         )
     )
+    
+    application.add_handler(
+        CommandHandler(
+            "free_numbers",
+            free_numbers_command,
+        )
+    )
 
     # Сначала проверяем админские посты с лото.
     application.add_handler(
@@ -3651,6 +3684,20 @@ async def bot_startup():
 
     await application.initialize()
     await application.start()
+
+    await application.bot.set_my_commands(
+        [
+            BotCommand(
+                "free_numbers",
+                "Свободные номера",
+            ),
+            BotCommand(
+                "id",
+                "Мой Telegram ID",
+            ),
+        ],
+        scope=BotCommandScopeAllGroupChats(),
+    )
 
     await application.bot.set_webhook(
         url=f"{RENDER_EXTERNAL_URL}/telegram",
