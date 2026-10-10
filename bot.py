@@ -1989,6 +1989,16 @@ def is_free_numbers_command(text):
         "вільні номери",
     }
 
+def is_my_numbers_command(text):
+    if not text:
+        return False
+
+    text = normalize(text)
+
+    return text in {
+        "мои номера",
+        "мої номера",
+    }
 
 def get_lottery_message_link(lot):
     chat_id = str(lot["chat_id"])
@@ -2163,7 +2173,10 @@ async def my_numbers(
     )
 
 
-async def handle_lottery_reservation(update):
+async def handle_lottery_reservation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not update.message:
         return
     if not lottery_chat_allowed(
@@ -2204,6 +2217,14 @@ async def handle_lottery_reservation(update):
             parse_mode="HTML",
         )
 
+        return
+
+    # ====================================================
+    # МОИ НОМЕРА
+    # ====================================================
+
+    if is_my_numbers_command(text):
+        await my_numbers(update, context)
         return
 
     def parse_release_number_command(text):
@@ -3554,6 +3575,7 @@ async def handle_message(
     # Сначала проверяем бронь лото.
     await handle_lottery_reservation(
         update
+        context,
     )
 
     if not is_allowed_user(update):
@@ -3711,6 +3733,13 @@ def build_application():
         CommandHandler(
             "id",
             my_id,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "my_numbers",
+            my_numbers,
         )
     )
 
