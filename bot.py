@@ -10,11 +10,7 @@ from difflib import SequenceMatcher
 import gspread
 from google.oauth2.service_account import Credentials
 from flask import Flask, request
-from telegram import (
-    Update,
-    BotCommand,
-    MenuButtonCommands,
-)
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 
@@ -2059,7 +2055,11 @@ def format_free_numbers(lotteries):
         + "\n\n".join(parts)
     )
 
-async def free_numbers_command(
+# ============================================================
+# МОИ НОМЕРА
+# ============================================================
+
+async def my_numbers(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
@@ -2074,6 +2074,15 @@ async def free_numbers_command(
     if not lottery_topic_allowed(update):
         return
 
+    user_id = (
+        update.effective_user.id
+        if update.effective_user
+        else None
+    )
+
+    if not user_id:
+        return
+
     active_lotteries = read_lotteries()
 
     if not active_lotteries:
@@ -2082,14 +2091,77 @@ async def free_numbers_command(
         )
         return
 
-    message = format_free_numbers(
-        active_lotteries
-    )
+    result = []
+
+    for lot in active_lotteries:
+
+        user_numbers = []
+
+        for number in lot["numbers"]:
+
+            meta = (
+                lot.get(
+                    "reservation_meta",
+                    {}
+                )
+                .get(
+                    str(number),
+                    {}
+                )
+            )
+
+            if (
+                str(
+                    meta.get(
+                        "user_id",
+                        ""
+                    )
+                )
+                == str(user_id)
+            ):
+                user_numbers.append(number)
+
+        if user_numbers:
+            result.append(
+                (
+                    lot["number"],
+                    user_numbers,
+                )
+            )
+
+    if not result:
+        await update.message.reply_text(
+            "У вас нет активных номерков."
+        )
+        return
+
+    lines = [
+        "🎟 <b>Мои номера</b>",
+        "",
+    ]
+
+    for lottery_number, numbers in result:
+
+        numbers_text = ", ".join(
+            f"№{number}"
+            for number in numbers
+        )
+
+        lines.append(
+            f"🟢 <b>Лото №{lottery_number}</b>"
+        )
+
+        lines.append(
+            numbers_text
+        )
+
+        lines.append("")
 
     await update.message.reply_text(
-        message,
+        "\n".join(lines).strip(),
         parse_mode="HTML",
     )
+
 
 async def handle_lottery_reservation(update):
     if not update.message:
@@ -3641,13 +3713,6 @@ def build_application():
             my_id,
         )
     )
-    
-    application.add_handler(
-        CommandHandler(
-            "free_numbers",
-            free_numbers_command,
-        )
-    )
 
     # Сначала проверяем админские посты с лото.
     application.add_handler(
@@ -3684,23 +3749,6 @@ async def bot_startup():
 
     await application.initialize()
     await application.start()
-
-    await application.bot.set_my_commands(
-        [
-            BotCommand(
-                "free_numbers",
-                "Свободные номера",
-            ),
-            BotCommand(
-                "id",
-                "Мой Telegram ID",
-            ),
-        ],
-    )
-
-    await application.bot.set_chat_menu_button(
-        menu_button=MenuButtonCommands()
-    )
 
     await application.bot.set_webhook(
         url=f"{RENDER_EXTERNAL_URL}/telegram",
