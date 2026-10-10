@@ -3574,7 +3574,7 @@ async def handle_message(
 ):
     # Сначала проверяем бронь лото.
     await handle_lottery_reservation(
-        update
+        update,
         context,
     )
 
